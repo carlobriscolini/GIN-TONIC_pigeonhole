@@ -39,7 +39,7 @@
 #define GIN_MAIN_QUERY_EXIT_PROMPT "exit();"
 
 char *gin_version = "1.1";
-char* gin_mode_names[] = {"index","deindex", "query","decode","permutation","utils","help"};
+char* gin_mode_names[] = {"index","deindex", "query","decode","permutation", "utils", "pigeonhole", "help"};
 
 typedef enum gin_mode_ {
     gin_mode_index=0,
@@ -48,8 +48,9 @@ typedef enum gin_mode_ {
     gin_mode_decode=3,
     gin_mode_permutation=4,
     gin_mode_utils=5,
-    gin_mode_help=6,
-    gin_mode_no_modes=7
+    gin_mode_pigeonhole=6,
+    gin_mode_help=7,
+    gin_mode_no_modes=8
 } gin_mode_t;
 
 char* gin_query_mode_names[] = {"find","cache"};
@@ -170,6 +171,10 @@ int main(int argc, char *argv[]) {
             char *utils_mode_name = argcp > 1 ? argvp[1] : NULL;
             gin_utils_mode_t utils_mode = gin_string_to_cmode(utils_mode_name);
             return_code = gin_main_utils(argcp, argvp, utils_mode);
+            break;
+        }
+        case gin_mode_pigeonhole : {
+            return_code = gin_main_pigeonhole(argcp, argvp);
             break;
         }
         case gin_mode_help: {
@@ -1800,6 +1805,7 @@ int gin_main_permutation(int argc, char **argv) {
 }
 
 int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode) {
+
     char *finput_path = NULL;
     char *foutput_path = NULL;
     char *fref_path = NULL;
@@ -2117,6 +2123,12 @@ int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode) {
         }
     }
     return return_code;
+}
+
+int gin_main_pigeonhole(int argc, char **argv) {
+
+    printf("funziona\n");
+
 }
 
 int gin_main_help(gin_mode_t progmode, char *progname) {
