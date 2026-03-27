@@ -2127,7 +2127,188 @@ int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode) {
 
 int gin_main_pigeonhole(int argc, char **argv) {
 
-    printf("funziona\n");
+    int return_code = 0;
+
+    char *fref_path = NULL;
+    char *finput_path = NULL;
+    char *foutput_path = NULL;
+
+    FILE *finput = stdin;
+    FILE *foutput = stdout;
+    FILE *fref = NULL;
+
+    int_t batch_size = 8;
+    int_t max_forks = -1;
+
+    // statistics for path enumeration
+    int_t queries_processed = 0;
+
+    static struct option options[] = {
+            {"reference",  required_argument, NULL, 'r'},
+            {"input",      required_argument, NULL, 'i'},          
+            {"output",     required_argument, NULL, 'o'},
+    };
+    opterr = 0;
+    int optindex,c;
+    while((c = getopt_long(argc, argv, "r:i:o:", options, &optindex)) != -1) {
+        switch(c) {
+            case 'r': {
+                fref_path = optarg;
+                break;
+            }
+            case 'i': {
+                finput_path = optarg;
+                finput = fopen(finput_path, "r");
+                if(!finput) {
+                    fprintf(stderr, "[gin:query] Input query path %s could not be opened, quitting.\n", finput_path);
+                    return_code = -1;
+                    return return_code;
+                }
+                break;
+            }
+            case 'o': {
+                foutput_path = optarg;
+                break;
+            }
+            default: {
+                fprintf(stderr, "[gin:query] Option %s not recognized, please see gin help query for more.\n",optarg);
+                return_code = -1;
+                break;
+            }
+        }
+    }
+
+    /**************************************************************************
+    * 1 - Read the graph index from disk, gin_buf and gin_buf_size should be
+    * populated and fref be closed by the end of this block
+    **************************************************************************/
+    fref = fopen(fref_path, "r");
+    if(!fref) {
+        fprintf(stderr, "[gin:query] Could not open index reference file %s, quitting.\n", fref_path);
+        return_code = -1;
+        return return_code;
+    }
+
+    uint64_t gin_buf_capacity = 65536;
+    uint64_t gin_buf_size = 0;
+    uint8_t *gin_buf = calloc(gin_buf_capacity, sizeof(uint8_t));
+
+    uint64_t read_size;
+    uint8_t *read_buf = calloc(GIN_MAIN_BUF_READ_SIZE, sizeof(uint8_t));
+    while((read_size = fread(read_buf,sizeof(uint8_t), GIN_MAIN_BUF_READ_SIZE, fref))) {
+        if(read_size + gin_buf_size > gin_buf_capacity) {
+            gin_buf = realloc(gin_buf, (gin_buf_capacity *= 2)*sizeof(uint8_t));
+            memset(gin_buf + (gin_buf_capacity/2), 0, sizeof(uint8_t)*(gin_buf_capacity/2));
+        }
+        memcpy(gin_buf+gin_buf_size,read_buf,read_size);
+        gin_buf_size+=read_size;
+    }
+    gin_buf = realloc(gin_buf, gin_buf_size*sizeof(uint8_t));
+    free(read_buf);
+    fclose(fref);
+
+    /**************************************************************************
+    * 2 - Parse the bitstream into data structures, by the end of this block
+    * gin should be populated and gin_buf should be freed
+    **************************************************************************/
+    gin_gin_t *gin;
+    gin_gin_cache_t *gin_cache = NULL;
+    gin_gin_serialize_from_buffer(&gin, gin_buf, gin_buf_size);
+
+    if(!gin) {
+        fprintf(stderr, "[gin:query] Error encountered while parsing reference index. Quitting.\n");
+        return_code = -1;
+        return return_code;
+    }
+
+    /**************************************************************************
+    * 3 - Parse queries from the input stream and query
+    **************************************************************************/
+    if(finput_path) {
+        finput = fopen(finput_path, "r");
+        if(!finput) {
+            fprintf(stderr,"[gin:query] Can't open input file %s, quitting.\n", finput_path);
+            return_code = -1;
+            return return_code;
+        }
+    }
+    if(foutput_path) {
+        foutput = fopen(foutput_path, "w");
+        if(!foutput) {
+            fprintf(stderr, "[gin:query] Can't open output file %s, quitting.\n", foutput_path);
+            return_code = -1;
+            return return_code;
+        }
+    }
+    
+    int_t i;
+    char *buf = calloc(GIN_MAIN_QUERY_BUF_LEN, sizeof(char));
+    typedef struct query_task_ {
+        gin_string_t *str;
+        uint64_t count;
+        gin_vector_t *exact_matches;
+        gin_vector_t *partial_matches;
+        gin_gin_stats_t *stats;
+    } query_task_t;
+    query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
+    bool exit_flag = false;
+
+    while(true) {
+        i = 0;
+
+        while (i < batch_size && fgets(buf, GIN_MAIN_QUERY_BUF_LEN, finput)) {
+            int_t len = (int_t)strlen(buf);
+            if(buf[len-1] == '\n') buf[len-1] = 0; // get rid of the end line character
+            if(!strcmp(buf,GIN_MAIN_QUERY_EXIT_PROMPT)) {
+                exit_flag = true;
+                break;
+            }
+            gin_string_init_cstr(&tasks[i].str, buf);
+            queries_processed++;
+            i++;
+        }
+
+        for(int_t k = 0; k < i; k++) {
+            gin_gin_query_find(gin, gin_cache, tasks[k].str, max_forks, &tasks[k].exact_matches, &tasks[k].partial_matches, &tasks[k].stats);
+        }
+
+        for (int_t j = 0; j < i; j++) {
+            if (!tasks[j].str) continue;
+            int_t matching_count = 0;
+            for (int_t k = 0; k < tasks[j].exact_matches->size; k++) {
+                gin_fork_node_t *fork = tasks[j].exact_matches->data[k];
+                matching_count += fork->sa_hi - fork->sa_lo;
+            }
+            fprintf(foutput, "%s:\n", tasks[j].str->seq);
+            for (int_t k = 0; k < tasks[j].exact_matches->size; k++) {
+                gin_fork_node_t *fork = tasks[j].exact_matches->data[k];
+                fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo,fork->sa_hi);
+            } if(!tasks[j].exact_matches->size) {
+                fprintf(foutput, "\t-\n");
+            }
+
+            gin_vector_free(tasks[j].exact_matches);
+            gin_vector_free(tasks[j].partial_matches);
+            gin_string_free(tasks[j].str);
+            free(tasks[j].stats);
+            tasks[j].str = NULL;
+        }
+
+        if(exit_flag)
+            break;
+    }
+    free(buf);
+    free(tasks);
+
+    /**************************************************************************
+    * 4 - Free all data structures and return
+    **************************************************************************/
+    fprintf(foutput,"%s\n", GIN_MAIN_QUERY_EXIT_PROMPT);
+    if(finput_path) fclose(finput);
+    if(foutput_path) fclose(foutput);
+    gin_gin_free(gin);
+
+    return return_code;
 
 }
 
