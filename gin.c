@@ -2268,30 +2268,55 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
-        for(int_t k = 0; k < i; k++) {
-            gin_gin_query_find(gin, gin_cache, tasks[k].str, max_forks, &tasks[k].exact_matches, &tasks[k].partial_matches, &tasks[k].stats);
-        }
+        int_t threshold = 1;
+        int_t c = 0;
+        int_t start;
+
+        typedef struct query_region {
+            gin_string_t *subs;
+            uint64_t count;
+            gin_vector_t *exact_matches;
+            gin_vector_t *partial_matches;
+            gin_gin_stats_t *stats;
+        } query_region_t;
+        query_region_t *regions = calloc(batch_size * 25, sizeof(query_region_t));
 
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
-            int_t matching_count = 0;
-            for (int_t k = 0; k < tasks[j].exact_matches->size; k++) {
-                gin_fork_node_t *fork = tasks[j].exact_matches->data[k];
-                matching_count += fork->sa_hi - fork->sa_lo;
-            }
-            fprintf(foutput, "%s:\n", tasks[j].str->seq);
-            for (int_t k = 0; k < tasks[j].exact_matches->size; k++) {
-                gin_fork_node_t *fork = tasks[j].exact_matches->data[k];
-                fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo,fork->sa_hi);
-            } if(!tasks[j].exact_matches->size) {
-                fprintf(foutput, "\t-\n");
-            }
+            start = 0;
+            for(int_t z = 1; z < tasks[j].str->size + 1; z++) {
+                gin_string_init(&regions[c].subs, (z - start) + 1);
+                gin_string_substring(tasks[j].str, start, z, &regions[c].subs);
+                gin_gin_query_find(gin, gin_cache, regions[c].subs, max_forks, &regions[c].exact_matches, &regions[c].partial_matches, &regions[c].stats);
+                int_t matching_count = 0;
+                for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
+                    gin_fork_node_t *fork = regions[c].exact_matches->data[k];
+                    matching_count += fork->sa_hi - fork->sa_lo;
+                }
 
-            gin_vector_free(tasks[j].exact_matches);
-            gin_vector_free(tasks[j].partial_matches);
-            gin_string_free(tasks[j].str);
-            free(tasks[j].stats);
-            tasks[j].str = NULL;
+
+                if(matching_count <= threshold){
+                    fprintf(foutput, "%s, %lld:\n", regions[c].subs->seq, matching_count);
+                    for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
+                        gin_fork_node_t *fork = regions[c].exact_matches->data[k];
+                        fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo,fork->sa_hi);
+                    } 
+                    if(!regions[c].exact_matches->size) {
+                        fprintf(foutput, "\t-\n");
+                    }
+                }
+
+                gin_vector_free(regions[c].exact_matches);
+                gin_vector_free(regions[c].partial_matches);
+                gin_string_free(regions[c].subs);
+                free(regions[c].stats);
+                regions[c].subs = NULL;
+
+                if(matching_count <= threshold) {
+                    c++;
+                    start = z;
+                }
+            }
         }
 
         if(exit_flag)
