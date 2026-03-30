@@ -2140,8 +2140,13 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t batch_size = 8;
     int_t max_forks = -1;
 
+    struct timespec t1;
+    struct timespec t2;
+
     // statistics for path enumeration
     int_t queries_processed = 0;
+    double total_substring_generation_time = .0;
+    double total_query_time = .0;
 
     static struct option options[] = {
             {"reference",  required_argument, NULL, 'r'},
@@ -2281,9 +2286,19 @@ int gin_main_pigeonhole(int argc, char **argv) {
             if (!tasks[j].str) continue;
             end = tasks[j].str->size;
             for(int_t start = tasks[j].str->size - 1; start > -1; start--) {
+
                 gin_string_init(&regions[c].subs, (end - start));
+
+                clock_gettime(CLOCK_REALTIME, &t1);
                 gin_string_substring(tasks[j].str, start, end, &regions[c].subs);
+                clock_gettime(CLOCK_REALTIME, &t2);
+                total_substring_generation_time += to_sec(t1,t2);
+                
+                clock_gettime(CLOCK_REALTIME, &t1);
                 gin_gin_query_find(gin, gin_cache, regions[c].subs, max_forks, &regions[c].exact_matches, &regions[c].partial_matches, &regions[c].stats);
+                clock_gettime(CLOCK_REALTIME, &t2);
+                total_query_time += to_sec(t1,t2);
+
                 int_t matching_count = 0;
                 for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
                     gin_fork_node_t *fork = regions[c].exact_matches->data[k];
@@ -2324,6 +2339,8 @@ int gin_main_pigeonhole(int argc, char **argv) {
     * 4 - Free all data structures and return
     **************************************************************************/
     fprintf(foutput,"%s\n", GIN_MAIN_QUERY_EXIT_PROMPT);
+    fprintf(foutput,"total substring generation time: %lf seconds\n", total_substring_generation_time);
+    fprintf(foutput,"total query time: %lf seconds\n", total_query_time);
     if(finput_path) fclose(finput);
     if(foutput_path) fclose(foutput);
     gin_gin_free(gin);
