@@ -2245,10 +2245,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
     char *buf = calloc(GIN_MAIN_QUERY_BUF_LEN, sizeof(char));
     typedef struct query_task_ {
         gin_string_t *str;
-        uint64_t count;
-        gin_vector_t *exact_matches;
-        gin_vector_t *partial_matches;
-        gin_gin_stats_t *stats;
     } query_task_t;
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
     bool exit_flag = false;
@@ -2270,7 +2266,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
         int_t threshold = 1;
         int_t c = 0;
-        int_t start;
+        int_t end;
 
         typedef struct query_region {
             gin_string_t *subs;
@@ -2283,10 +2279,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
-            start = 0;
-            for(int_t z = 1; z < tasks[j].str->size + 1; z++) {
-                gin_string_init(&regions[c].subs, (z - start) + 1);
-                gin_string_substring(tasks[j].str, start, z, &regions[c].subs);
+            end = tasks[j].str->size;
+            for(int_t start = tasks[j].str->size - 1; start > -1; start--) {
+                gin_string_init(&regions[c].subs, (end - start));
+                gin_string_substring(tasks[j].str, start, end, &regions[c].subs);
                 gin_gin_query_find(gin, gin_cache, regions[c].subs, max_forks, &regions[c].exact_matches, &regions[c].partial_matches, &regions[c].stats);
                 int_t matching_count = 0;
                 for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
@@ -2294,8 +2290,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     matching_count += fork->sa_hi - fork->sa_lo;
                 }
 
-
-                if(matching_count <= threshold){
+                if(matching_count <= threshold || start == 0){
                     fprintf(foutput, "%s, %lld:\n", regions[c].subs->seq, matching_count);
                     for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
                         gin_fork_node_t *fork = regions[c].exact_matches->data[k];
@@ -2314,7 +2309,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
                 if(matching_count <= threshold) {
                     c++;
-                    start = z;
+                    end = start;
                 }
             }
         }
