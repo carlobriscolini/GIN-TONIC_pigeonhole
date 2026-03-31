@@ -2132,12 +2132,15 @@ int gin_main_pigeonhole(int argc, char **argv) {
     char *fref_path = NULL;
     char *finput_path = NULL;
     char *foutput_path = NULL;
+    char *fcache_path = NULL;
 
     FILE *finput = stdin;
     FILE *foutput = stdout;
     FILE *fref = NULL;
+    FILE *fcache = NULL;
 
     int_t batch_size = 8;
+    int_t cache_depth = 0;
     int_t max_forks = -1;
 
     struct timespec t1;
@@ -2145,6 +2148,8 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     // statistics for path enumeration
     int_t queries_processed = 0;
+
+    double cache_build_time = .0;
     double total_substring_generation_time = .0;
     double total_query_time = .0;
 
@@ -2152,10 +2157,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
             {"reference",  required_argument, NULL, 'r'},
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
+            {"cache"      ,required_argument, NULL, 'C'},
     };
     opterr = 0;
     int optindex,c;
-    while((c = getopt_long(argc, argv, "r:i:o:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:i:o:C:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': {
                 fref_path = optarg;
@@ -2173,6 +2179,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             case 'o': {
                 foutput_path = optarg;
+                break;
+            }
+            case 'C': {
+                fcache_path = optarg;
                 break;
             }
             default: {
@@ -2214,7 +2224,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     /**************************************************************************
     * 2 - Parse the bitstream into data structures, by the end of this block
-    * gin should be populated and gin_buf should be freed
+    * gin, gin_cache should be populated and gin_buf should be freed
     **************************************************************************/
     gin_gin_t *gin;
     gin_gin_cache_t *gin_cache = NULL;
@@ -2224,6 +2234,37 @@ int gin_main_pigeonhole(int argc, char **argv) {
         fprintf(stderr, "[gin:query] Error encountered while parsing reference index. Quitting.\n");
         return_code = -1;
         return return_code;
+    }
+
+    if(fcache_path) {
+        fcache = fopen(fcache_path, "r");
+        if(!fcache) {
+            fprintf(stderr, "[gin:query] Error encountered while parsing cache. Quitting.\n");
+            return_code = -1;
+            return return_code;
+        }
+        uint64_t gin_cache_buf_capacity = 65536;
+        uint64_t gin_cache_buf_size = 0;
+        uint8_t *gin_cache_buf = calloc(gin_cache_buf_capacity, sizeof(uint8_t));
+
+        uint64_t cache_read_size;
+        uint8_t *cache_read_buf = calloc(GIN_MAIN_BUF_READ_SIZE, sizeof(uint8_t));
+        clock_gettime(CLOCK_REALTIME, &t1);
+        while((cache_read_size = fread(cache_read_buf,sizeof(uint8_t), GIN_MAIN_BUF_READ_SIZE, fcache))) {
+            if(cache_read_size + gin_cache_buf_size > gin_cache_buf_capacity) {
+                gin_cache_buf = realloc(gin_cache_buf, (gin_cache_buf_capacity *= 2)*sizeof(uint8_t));
+                memset(gin_cache_buf + (gin_cache_buf_capacity/2), 0, sizeof(uint8_t)*(gin_cache_buf_capacity/2));
+            }
+            memcpy(gin_cache_buf+gin_cache_buf_size,cache_read_buf,cache_read_size);
+            gin_cache_buf_size+=cache_read_size;
+        }
+        gin_cache_buf = realloc(gin_cache_buf, gin_cache_buf_size*sizeof(uint8_t));
+        free(cache_read_buf);
+        fclose(fcache);
+        gin_gin_cache_serialize_from_buffer(&gin_cache, gin_cache_buf, gin_cache_buf_size);
+        clock_gettime(CLOCK_REALTIME, &t2);
+        cache_build_time += to_sec(t1,t2);
+        cache_depth = gin_cache->depth;
     }
 
     /**************************************************************************
@@ -2341,6 +2382,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
     fprintf(foutput,"%s\n", GIN_MAIN_QUERY_EXIT_PROMPT);
     fprintf(foutput,"total substring generation time: %lf seconds\n", total_substring_generation_time);
     fprintf(foutput,"total query time: %lf seconds\n", total_query_time);
+    fprintf(foutput,"total cache build time: %lf seconds\n", cache_build_time);
+    fprintf(foutput,"cache depth: %lld\n", cache_depth);
+    if(fcache_path) {
+        gin_gin_cache_free(gin_cache);
+    }
     if(finput_path) fclose(finput);
     if(foutput_path) fclose(foutput);
     gin_gin_free(gin);
