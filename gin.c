@@ -2139,6 +2139,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     FILE *fref = NULL;
     FILE *fcache = NULL;
 
+    int_t num_threads = 1;
     int_t batch_size = 8;
     int_t cache_depth = 0;
     int_t max_forks = -1;
@@ -2158,10 +2159,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
             {"cache"      ,required_argument, NULL, 'C'},
+            {"threads",    required_argument, NULL, 'j'},
     };
     opterr = 0;
     int optindex,c;
-    while((c = getopt_long(argc, argv, "r:i:o:C:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:i:o:C:j:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': {
                 fref_path = optarg;
@@ -2183,6 +2185,13 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             case 'C': {
                 fcache_path = optarg;
+                break;
+            }
+            case 'j': {
+                num_threads = (int_t)strtoull(optarg, NULL, 10);
+                #ifdef GIN_OMP
+                omp_set_num_threads((int)num_threads);
+                #endif
                 break;
             }
             default: {
@@ -2288,11 +2297,28 @@ int gin_main_pigeonhole(int argc, char **argv) {
     }
     
     int_t i;
+    int_t threshold = 1;
     char *buf = calloc(GIN_MAIN_QUERY_BUF_LEN, sizeof(char));
+
     typedef struct query_task_ {
         gin_string_t *str;
     } query_task_t;
+
+    typedef struct query_region {
+            gin_string_t *subs;
+            uint64_t count;
+            gin_vector_t *exact_matches;
+            gin_vector_t *partial_matches;
+            gin_gin_stats_t *stats;
+        } query_region_t;
+
+    query_region_t *regions = calloc(batch_size * 25, sizeof(query_region_t));
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
+
+    #ifdef GIN_OMP
+    omp_set_num_threads((int)num_threads);
+    #endif
+    
     bool exit_flag = false;
 
     while(true) {
@@ -2310,19 +2336,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
-        int_t threshold = 1;
         int_t c = 0;
         int_t end;
 
-        typedef struct query_region {
-            gin_string_t *subs;
-            uint64_t count;
-            gin_vector_t *exact_matches;
-            gin_vector_t *partial_matches;
-            gin_gin_stats_t *stats;
-        } query_region_t;
-        query_region_t *regions = calloc(batch_size * 25, sizeof(query_region_t));
-
+        #pragma omp parallel for default(none) shared(gin, gin_cache, i, tasks, num_threads, max_forks)
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
             end = tasks[j].str->size;
