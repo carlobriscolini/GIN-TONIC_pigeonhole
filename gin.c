@@ -2303,18 +2303,20 @@ int gin_main_pigeonhole(int argc, char **argv) {
     typedef struct query_task_ {
         gin_string_t *str;
         int_t count;
+        gin_vector_t *regions_found;
     } query_task_t;
 
     typedef struct query_region {
             int_t start;
+            // end ridondante? -> start + subs->size danno dove inizia la regione e quanto è lunga
             int_t end;
             gin_string_t *subs;
+            int_t matching_count;
             gin_vector_t *exact_matches;
             gin_vector_t *partial_matches;
             gin_gin_stats_t *stats;
         } query_region_t;
 
-    query_region_t *regions = calloc(batch_size * 25, sizeof(query_region_t));
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
 
     #ifdef GIN_OMP
@@ -2334,6 +2336,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 break;
             }
             gin_string_init_cstr(&tasks[i].str, buf);
+
+            gin_vector_init(&tasks[i].regions_found, GIN_VECTOR_INIT_SIZE, NULL);
+
+            tasks[i].count = 0;
             queries_processed++;
             i++;
         }
@@ -2342,52 +2348,86 @@ int gin_main_pigeonhole(int argc, char **argv) {
             if (!tasks[j].str) continue;
 
             int_t local_end = tasks[j].str->size;
-            int_t local_count = 0;
+            int_t local_region_count = 0;
 
             for(int_t local_start = tasks[j].str->size - 1; local_start > -1; local_start--) {
 
-                gin_string_init(&regions[local_count].subs, (local_end - local_start));
+                // variabili locali. Solo quando queste riguardano una regione valida vengono salvate in una regione.
+                // non utilizzo fin da subito una regione per evitare di doverla riallocare ad ogni iterazione in cui non va bene
+                gin_string_t *current_subs;
+                gin_vector_t *current_exact;
+                gin_vector_t *current_partial;
+                gin_gin_stats_t *current_stats;
+                struct timespec t1, t2;
+
+                gin_string_init(&current_subs, (local_end - local_start));
 
                 clock_gettime(CLOCK_REALTIME, &t1);
-                gin_string_substring(tasks[j].str, local_start, local_end, &regions[local_count].subs);
+                gin_string_substring(tasks[j].str, local_start, local_end, &current_subs);
                 clock_gettime(CLOCK_REALTIME, &t2);
                 total_substring_generation_time += to_sec(t1,t2);
                 
                 clock_gettime(CLOCK_REALTIME, &t1);
-                gin_gin_query_find(gin, gin_cache, regions[local_count].subs, max_forks, &regions[local_count].exact_matches, &regions[local_count].partial_matches, &regions[local_count].stats);
+                gin_gin_query_find(gin, gin_cache, current_subs, max_forks, &current_exact, &current_partial, &current_stats);
                 clock_gettime(CLOCK_REALTIME, &t2);
                 total_query_time += to_sec(t1,t2);
 
                 int_t matching_count = 0;
-                for (int_t k = 0; k < regions[local_count].exact_matches->size; k++) {
-                    gin_fork_node_t *fork = regions[local_count].exact_matches->data[k];
+                for (int_t k = 0; k < current_exact->size; k++) {
+                    gin_fork_node_t *fork = current_exact->data[k];
                     matching_count += fork->sa_hi - fork->sa_lo;
                 }
 
                 if(matching_count <= threshold || local_start == 0){
 
-                    fprintf(foutput, "%s, %lld:\n", regions[local_count].subs->seq, matching_count);
+                    query_region_t *reg = calloc(1, sizeof(query_region_t));
+                    reg->start = local_start;
+                    reg->end = local_end;
+                    reg->subs = current_subs;
+                    reg->matching_count = matching_count;
+                    reg->exact_matches = current_exact;
+                    reg->partial_matches = current_partial;
+                    reg->stats = current_stats;
 
-                    for (int_t k = 0; k < regions[local_count].exact_matches->size; k++) {
-                        gin_fork_node_t *fork = regions[local_count].exact_matches->data[k];
-                        fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo,fork->sa_hi);
-                    } 
+                    gin_vector_append(tasks[j].regions_found, reg);
 
-                    if(!regions[local_count].exact_matches->size) {
-                        fprintf(foutput, "\t-\n");
-                    }
-
-                    local_count++;
+                    local_region_count++;
                     local_end = local_start;
 
-                }
+                } else {    
 
-                gin_vector_free(regions[local_count].exact_matches);
-                gin_vector_free(regions[local_count].partial_matches);
-                gin_string_free(regions[local_count].subs);
-                free(regions[local_count].stats);
-                regions[local_count].subs = NULL;
+                    gin_vector_free(current_exact);
+                    gin_vector_free(current_partial);
+                    gin_string_free(current_subs);
+                    free(current_stats);
+                }
             }
+            tasks[j].count = local_region_count;
+        }
+
+        // outpt risultati
+        for (int_t j = 0; j < i; j++) {
+            for (int_t r = 0; r < tasks[j].regions_found->size; r++) {
+                query_region_t *reg = (query_region_t *)tasks[j].regions_found->data[r];
+                
+                fprintf(foutput, "%s, %lld:\n", reg->subs->seq, reg->matching_count);
+                for (int_t k = 0; k < reg->exact_matches->size; k++) {
+                    gin_fork_node_t *fork = reg->exact_matches->data[k];
+                    fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo, fork->sa_hi);
+                }
+                if (!reg->exact_matches->size) fprintf(foutput, "\t-\n");
+
+                // pulizia dopo stampa
+                gin_vector_free(reg->exact_matches);
+                gin_vector_free(reg->partial_matches);
+                gin_string_free(reg->subs);
+                free(reg->stats);
+                free(reg);
+            }
+            // reset tasks per il prossimo batch
+            tasks[j].regions_found->size = 0; 
+            gin_string_free(tasks[j].str);
+            tasks[j].str = NULL;
         }
 
         if(exit_flag)
