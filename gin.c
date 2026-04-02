@@ -2302,11 +2302,13 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     typedef struct query_task_ {
         gin_string_t *str;
+        int_t count;
     } query_task_t;
 
     typedef struct query_region {
+            int_t start;
+            int_t end;
             gin_string_t *subs;
-            uint64_t count;
             gin_vector_t *exact_matches;
             gin_vector_t *partial_matches;
             gin_gin_stats_t *stats;
@@ -2318,7 +2320,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     #ifdef GIN_OMP
     omp_set_num_threads((int)num_threads);
     #endif
-    
+
     bool exit_flag = false;
 
     while(true) {
@@ -2336,54 +2338,55 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
-        int_t c = 0;
-        int_t end;
-
-        #pragma omp parallel for default(none) shared(gin, gin_cache, i, tasks, num_threads, max_forks)
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
-            end = tasks[j].str->size;
-            for(int_t start = tasks[j].str->size - 1; start > -1; start--) {
 
-                gin_string_init(&regions[c].subs, (end - start));
+            int_t local_end = tasks[j].str->size;
+            int_t local_count = 0;
+
+            for(int_t local_start = tasks[j].str->size - 1; local_start > -1; local_start--) {
+
+                gin_string_init(&regions[local_count].subs, (local_end - local_start));
 
                 clock_gettime(CLOCK_REALTIME, &t1);
-                gin_string_substring(tasks[j].str, start, end, &regions[c].subs);
+                gin_string_substring(tasks[j].str, local_start, local_end, &regions[local_count].subs);
                 clock_gettime(CLOCK_REALTIME, &t2);
                 total_substring_generation_time += to_sec(t1,t2);
                 
                 clock_gettime(CLOCK_REALTIME, &t1);
-                gin_gin_query_find(gin, gin_cache, regions[c].subs, max_forks, &regions[c].exact_matches, &regions[c].partial_matches, &regions[c].stats);
+                gin_gin_query_find(gin, gin_cache, regions[local_count].subs, max_forks, &regions[local_count].exact_matches, &regions[local_count].partial_matches, &regions[local_count].stats);
                 clock_gettime(CLOCK_REALTIME, &t2);
                 total_query_time += to_sec(t1,t2);
 
                 int_t matching_count = 0;
-                for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
-                    gin_fork_node_t *fork = regions[c].exact_matches->data[k];
+                for (int_t k = 0; k < regions[local_count].exact_matches->size; k++) {
+                    gin_fork_node_t *fork = regions[local_count].exact_matches->data[k];
                     matching_count += fork->sa_hi - fork->sa_lo;
                 }
 
-                if(matching_count <= threshold || start == 0){
-                    fprintf(foutput, "%s, %lld:\n", regions[c].subs->seq, matching_count);
-                    for (int_t k = 0; k < regions[c].exact_matches->size; k++) {
-                        gin_fork_node_t *fork = regions[c].exact_matches->data[k];
+                if(matching_count <= threshold || local_start == 0){
+
+                    fprintf(foutput, "%s, %lld:\n", regions[local_count].subs->seq, matching_count);
+
+                    for (int_t k = 0; k < regions[local_count].exact_matches->size; k++) {
+                        gin_fork_node_t *fork = regions[local_count].exact_matches->data[k];
                         fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo,fork->sa_hi);
                     } 
-                    if(!regions[c].exact_matches->size) {
+
+                    if(!regions[local_count].exact_matches->size) {
                         fprintf(foutput, "\t-\n");
                     }
+
+                    local_count++;
+                    local_end = local_start;
+
                 }
 
-                gin_vector_free(regions[c].exact_matches);
-                gin_vector_free(regions[c].partial_matches);
-                gin_string_free(regions[c].subs);
-                free(regions[c].stats);
-                regions[c].subs = NULL;
-
-                if(matching_count <= threshold) {
-                    c++;
-                    end = start;
-                }
+                gin_vector_free(regions[local_count].exact_matches);
+                gin_vector_free(regions[local_count].partial_matches);
+                gin_string_free(regions[local_count].subs);
+                free(regions[local_count].stats);
+                regions[local_count].subs = NULL;
             }
         }
 
