@@ -2151,8 +2151,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t queries_processed = 0;
 
     double cache_build_time = .0;
-    double total_substring_generation_time = .0;
-    double total_query_time = .0;
+    double total_execution_time = .0;
 
     static struct option options[] = {
             {"reference",  required_argument, NULL, 'r'},
@@ -2344,6 +2343,8 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
+        clock_gettime(CLOCK_REALTIME, &t1);
+        #pragma omp parallel for default(none) shared(tasks, i, gin, gin_cache, max_forks, threshold)
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
 
@@ -2358,19 +2359,12 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 gin_vector_t *current_exact;
                 gin_vector_t *current_partial;
                 gin_gin_stats_t *current_stats;
-                struct timespec t1, t2;
 
                 gin_string_init(&current_subs, (local_end - local_start));
 
-                clock_gettime(CLOCK_REALTIME, &t1);
                 gin_string_substring(tasks[j].str, local_start, local_end, &current_subs);
-                clock_gettime(CLOCK_REALTIME, &t2);
-                total_substring_generation_time += to_sec(t1,t2);
                 
-                clock_gettime(CLOCK_REALTIME, &t1);
                 gin_gin_query_find(gin, gin_cache, current_subs, max_forks, &current_exact, &current_partial, &current_stats);
-                clock_gettime(CLOCK_REALTIME, &t2);
-                total_query_time += to_sec(t1,t2);
 
                 int_t matching_count = 0;
                 for (int_t k = 0; k < current_exact->size; k++) {
@@ -2378,7 +2372,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     matching_count += fork->sa_hi - fork->sa_lo;
                 }
 
-                if(matching_count <= threshold || local_start == 0){
+                if(matching_count <= threshold){
 
                     query_region_t *reg = calloc(1, sizeof(query_region_t));
                     reg->start = local_start;
@@ -2404,6 +2398,8 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             tasks[j].count = local_region_count;
         }
+        clock_gettime(CLOCK_REALTIME, &t2);
+        total_execution_time += to_sec(t1,t2);
 
         // outpt risultati
         for (int_t j = 0; j < i; j++) {
@@ -2440,8 +2436,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     * 4 - Free all data structures and return
     **************************************************************************/
     fprintf(foutput,"%s\n", GIN_MAIN_QUERY_EXIT_PROMPT);
-    fprintf(foutput,"total substring generation time: %lf seconds\n", total_substring_generation_time);
-    fprintf(foutput,"total query time: %lf seconds\n", total_query_time);
+    fprintf(foutput,"total queries finding time: %lf seconds\n", total_execution_time);
     fprintf(foutput,"total cache build time: %lf seconds\n", cache_build_time);
     fprintf(foutput,"cache depth: %lld\n", cache_depth);
     if(fcache_path) {
