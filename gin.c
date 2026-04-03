@@ -2140,9 +2140,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
     FILE *fcache = NULL;
 
     int_t num_threads = 1;
-    int_t batch_size = 8;
+    int_t batch_size = 1024;
     int_t cache_depth = 0;
     int_t max_forks = -1;
+    int_t threshold = 1;
 
     struct timespec t1;
     struct timespec t2;
@@ -2159,10 +2160,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
             {"output",     required_argument, NULL, 'o'},
             {"cache"      ,required_argument, NULL, 'C'},
             {"threads",    required_argument, NULL, 'j'},
+            {"threshold",  required_argument, NULL, 't'},
     };
     opterr = 0;
     int optindex,c;
-    while((c = getopt_long(argc, argv, "r:i:o:C:j:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:i:o:C:j:t:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': {
                 fref_path = optarg;
@@ -2193,6 +2195,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 #endif
                 break;
             }
+            case 't': {
+                threshold = (int_t)strtoull(optarg, NULL, 10);
+                break;
+            }
+
             default: {
                 fprintf(stderr, "[gin:query] Option %s not recognized, please see gin help query for more.\n",optarg);
                 return_code = -1;
@@ -2296,7 +2303,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
     }
     
     int_t i;
-    int_t threshold = 1;
     char *buf = calloc(GIN_MAIN_QUERY_BUF_LEN, sizeof(char));
 
     typedef struct query_task_ {
@@ -2329,7 +2335,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
         while (i < batch_size && fgets(buf, GIN_MAIN_QUERY_BUF_LEN, finput)) {
             int_t len = (int_t)strlen(buf);
-            if(buf[len-1] == '\n') buf[len-1] = 0; // get rid of the end line character
+            if(buf[len-1] == '\n') buf[len-1] = 0;
             if(!strcmp(buf,GIN_MAIN_QUERY_EXIT_PROMPT)) {
                 exit_flag = true;
                 break;
@@ -2353,14 +2359,12 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
             for(int_t local_start = tasks[j].str->size - 1; local_start > -1; local_start--) {
 
-                // variabili locali. Solo quando queste riguardano una regione valida vengono salvate in una regione.
-                // non utilizzo fin da subito una regione per evitare di doverla riallocare ad ogni iterazione in cui non va bene
                 gin_string_t *current_subs;
                 gin_vector_t *current_exact;
                 gin_vector_t *current_partial;
                 gin_gin_stats_t *current_stats;
 
-                gin_string_init(&current_subs, (local_end - local_start));
+                // gin_string_init(&current_subs, (local_end - local_start));
 
                 gin_string_substring(tasks[j].str, local_start, local_end, &current_subs);
                 
