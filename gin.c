@@ -2140,7 +2140,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     FILE *fcache = NULL;
 
     int_t num_threads = 1;
-    int_t batch_size = 1024;
+    int_t batch_size = 8;
     int_t cache_depth = 0;
     int_t max_forks = -1;
     int_t threshold = 1;
@@ -2159,12 +2159,13 @@ int gin_main_pigeonhole(int argc, char **argv) {
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
             {"cache"      ,required_argument, NULL, 'C'},
+            {"batch-size", required_argument, NULL, 'b'},
             {"threads",    required_argument, NULL, 'j'},
             {"threshold",  required_argument, NULL, 't'},
     };
     opterr = 0;
     int optindex,c;
-    while((c = getopt_long(argc, argv, "r:i:o:C:j:t:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:i:o:C:b:j:t:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': {
                 fref_path = optarg;
@@ -2188,6 +2189,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 fcache_path = optarg;
                 break;
             }
+            case 'b': {
+                batch_size = (int_t)strtoull(optarg, NULL, 10);
+                break;
+            }
             case 'j': {
                 num_threads = (int_t)strtoull(optarg, NULL, 10);
                 #ifdef GIN_OMP
@@ -2199,7 +2204,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 threshold = (int_t)strtoull(optarg, NULL, 10);
                 break;
             }
-
             default: {
                 fprintf(stderr, "[gin:query] Option %s not recognized, please see gin help query for more.\n",optarg);
                 return_code = -1;
@@ -2349,7 +2353,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
-        clock_gettime(CLOCK_REALTIME, &t1);
+
         #pragma omp parallel for default(none) shared(tasks, i, gin, gin_cache, max_forks, threshold)
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
@@ -2363,8 +2367,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 gin_vector_t *current_exact;
                 gin_vector_t *current_partial;
                 gin_gin_stats_t *current_stats;
-
-                // gin_string_init(&current_subs, (local_end - local_start));
 
                 gin_string_substring(tasks[j].str, local_start, local_end, &current_subs);
                 
@@ -2402,8 +2404,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             tasks[j].count = local_region_count;
         }
-        clock_gettime(CLOCK_REALTIME, &t2);
-        total_execution_time += to_sec(t1,t2);
+        
 
         // outpt risultati
         for (int_t j = 0; j < i; j++) {
