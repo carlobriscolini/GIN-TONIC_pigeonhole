@@ -2143,7 +2143,9 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t batch_size = 8;
     int_t cache_depth = 0;
     int_t max_forks = -1;
+    int_t max_matches = -1;
     int_t threshold = 1;
+    bool decode = false;
 
     struct timespec t1;
     struct timespec t2;
@@ -2159,13 +2161,14 @@ int gin_main_pigeonhole(int argc, char **argv) {
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
             {"cache"      ,required_argument, NULL, 'C'},
+            {"decode",     no_argument,       NULL, 'd'},
             {"batch-size", required_argument, NULL, 'b'},
             {"threads",    required_argument, NULL, 'j'},
             {"threshold",  required_argument, NULL, 't'},
     };
     opterr = 0;
     int optindex,c;
-    while((c = getopt_long(argc, argv, "r:i:o:C:b:j:t:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:i:o:C:d:b:j:t:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': {
                 fref_path = optarg;
@@ -2187,6 +2190,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             case 'C': {
                 fcache_path = optarg;
+                break;
+            }
+            case 'd': {
+                decode = true;
                 break;
             }
             case 'b': {
@@ -2243,10 +2250,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     /**************************************************************************
     * 2 - Parse the bitstream into data structures, by the end of this block
-    * gin, gin_cache should be populated and gin_buf should be freed
+    * gin, gin_dec, gin_cache should be populated and gin_buf should be freed
     **************************************************************************/
     gin_gin_t *gin;
     gin_gin_cache_t *gin_cache = NULL;
+    gin_gin_decoder_t *gin_dec;
     gin_gin_serialize_from_buffer(&gin, gin_buf, gin_buf_size);
 
     if(!gin) {
@@ -2254,7 +2262,9 @@ int gin_main_pigeonhole(int argc, char **argv) {
         return_code = -1;
         return return_code;
     }
-
+    if(decode) {
+                gin_gin_decoder_init(&gin_dec, gin);
+    }
     if(fcache_path) {
         fcache = fopen(fcache_path, "r");
         if(!fcache) {
@@ -2404,31 +2414,60 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             tasks[j].count = local_region_count;
         }
-        
+
 
         // outpt risultati
-        for (int_t j = 0; j < i; j++) {
-            for (int_t r = 0; r < tasks[j].regions_found->size; r++) {
-                query_region_t *reg = (query_region_t *)tasks[j].regions_found->data[r];
-                
-                fprintf(foutput, "%s, %lld:\n", reg->subs->seq, reg->matching_count);
-                for (int_t k = 0; k < reg->exact_matches->size; k++) {
-                    gin_fork_node_t *fork = reg->exact_matches->data[k];
-                    fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo, fork->sa_hi);
-                }
-                if (!reg->exact_matches->size) fprintf(foutput, "\t-\n");
 
-                // pulizia dopo stampa
-                gin_vector_free(reg->exact_matches);
-                gin_vector_free(reg->partial_matches);
-                gin_string_free(reg->subs);
-                free(reg->stats);
-                free(reg);
+        if(decode){
+            for(int_t j = 0; j < i; j++) {
+                for (int_t r = 0; r < tasks[j].regions_found->size; r++) {
+                    query_region_t *reg = (query_region_t *)tasks[j].regions_found->data[r];
+                    gin_vector_t *decoded_matches;
+                    gin_gin_decoder_decode_ends(gin_dec,reg->exact_matches, max_matches, &decoded_matches);
+                    fprintf(foutput, "%s:\n", reg->subs->seq);
+                    for(int_t k = 0; k < decoded_matches->size; k++) {
+                        gin_vector_t *decoded_matches_for_fork = decoded_matches->data[k];
+                        for(int_t l = 0; l < decoded_matches_for_fork->size; l++) {
+                            gin_decoded_match_t *decoded_match = decoded_matches_for_fork->data[l];
+                            fprintf(foutput, "\t(v:%lld,o:%lld)\n", decoded_match->vid, decoded_match->offset);
+                        }
+                    }
+                    if(!decoded_matches->size) {
+                        fprintf(foutput, "\t-\n");
+                    }
+                    gin_vector_free(decoded_matches);
+                    gin_vector_free(reg->exact_matches);
+                    gin_vector_free(reg->partial_matches);
+                    gin_string_free(reg->subs);
+                    free(reg->stats);
+                    free(reg);
+                }
             }
-            // reset tasks per il prossimo batch
-            tasks[j].regions_found->size = 0; 
-            gin_string_free(tasks[j].str);
-            tasks[j].str = NULL;
+        }        
+        else{
+            for (int_t j = 0; j < i; j++) {
+                for (int_t r = 0; r < tasks[j].regions_found->size; r++) {
+                    query_region_t *reg = (query_region_t *)tasks[j].regions_found->data[r];
+                    
+                    fprintf(foutput, "%s, %lld:\n", reg->subs->seq, reg->matching_count);
+                    for (int_t k = 0; k < reg->exact_matches->size; k++) {
+                        gin_fork_node_t *fork = reg->exact_matches->data[k];
+                        fprintf(foutput, "\t(%lld,%lld)\n", fork->sa_lo, fork->sa_hi);
+                    }
+                    if (!reg->exact_matches->size) fprintf(foutput, "\t-\n");
+
+                    // pulizia dopo stampa
+                    gin_vector_free(reg->exact_matches);
+                    gin_vector_free(reg->partial_matches);
+                    gin_string_free(reg->subs);
+                    free(reg->stats);
+                    free(reg);
+                }
+                // reset tasks per il prossimo batch
+                tasks[j].regions_found->size = 0; 
+                gin_string_free(tasks[j].str);
+                tasks[j].str = NULL;
+            }
         }
 
         if(exit_flag)
