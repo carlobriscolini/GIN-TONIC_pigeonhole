@@ -2323,12 +2323,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
         gin_string_t *str;
         int_t count;
         gin_vector_t *regions_found;
+        int_t no_exact_maches;
     } query_task_t;
 
     typedef struct query_region {
-            int_t start;
-            // end ridondante? -> start + subs->size danno dove inizia la regione e quanto è lunga
-            int_t end;
+            int_t qo;
             gin_string_t *subs;
             int_t matching_count;
             gin_vector_t *exact_matches;
@@ -2338,11 +2337,13 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
 
-    #ifdef GIN_OMP
-    omp_set_num_threads((int)num_threads);
-    #endif
+    gin_graph_t *graph = NULL;
+    gin_vector_t *permutation = NULL;
+    gin_gin_decode(gin, &graph, &permutation);
 
     bool exit_flag = false;
+
+    
 
     while(true) {
         i = 0;
@@ -2362,7 +2363,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
             queries_processed++;
             i++;
         }
-
 
         #pragma omp parallel for default(none) shared(tasks, i, gin, gin_cache, max_forks, threshold)
         for (int_t j = 0; j < i; j++) {
@@ -2391,8 +2391,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 if(matching_count <= threshold){
 
                     query_region_t *reg = calloc(1, sizeof(query_region_t));
-                    reg->start = local_start;
-                    reg->end = local_end;
+                    reg->qo = local_start;
                     reg->subs = current_subs;
                     reg->matching_count = matching_count;
                     reg->exact_matches = current_exact;
@@ -2413,7 +2412,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 }
             }
             tasks[j].count = local_region_count;
+
+            gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches);
         }
+
+
 
 
         // outpt risultati
@@ -2435,6 +2438,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     if(!decoded_matches->size) {
                         fprintf(foutput, "\t-\n");
                     }
+                    fprintf(foutput, "\tqo:%lld\n", reg->qo);
                     gin_vector_free(decoded_matches);
                     gin_vector_free(reg->exact_matches);
                     gin_vector_free(reg->partial_matches);
