@@ -1932,3 +1932,85 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
         gin_gin_serialize_to_buffer_imt_helper((gin_imt_node_t*)node->right, bs, widx);
     }
 }
+
+
+
+typedef struct query_task_ {
+    gin_string_t *str;
+    gin_vector_t *regions_found;
+    int_t no_exact_maches;
+} query_task_t;
+typedef struct query_region {
+    int_t qo;
+    gin_string_t *subs;
+    int_t matching_count;
+    gin_vector_t *exact_matches;
+    gin_vector_t *partial_matches;
+    gin_gin_stats_t *stats;
+} query_region_t;
+
+// da aggiungere int _t max_errors
+// gin_dfmi_decode per la decodifica dell'indice non ancora implementato -> passo .ging come argomento e lo parso in gin.c
+void gin_gin_verify_task(
+    gin_gin_t *gin,
+    gin_graph_t *graph,
+    gin_gin_decoder_t *dec,
+    query_task_t *task,
+    int_t max_matches,
+    int_t max_errors
+) {
+    // itero su ogni regione trovata 
+    for (int_t r = 0; r < task->regions_found->size; r++) {
+        query_region_t *reg = (query_region_t *)task->regions_found->data[r];
+        
+        // itero su ogni exact match (intervalli SA del fork) della regione
+        for (int_t f = 0; f < reg->exact_matches->size; f++) {
+            gin_fork_node_t *fork = (gin_fork_node_t *)reg->exact_matches->data[f];
+            
+            // decodifico l'intervallo SA in un vettore di match (vid (= id nodo), offset)
+            gin_vector_t *decoded_matches = NULL;
+            gin_gin_decoder_decode_one(dec, fork->sa_lo, fork->sa_hi, max_matches, &decoded_matches);
+            
+            if (!decoded_matches) continue;
+
+            // itero su ogni match trovato della regione per verficarlo
+            for (int_t m = 0; m < decoded_matches->size; m++) {
+                gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
+                fprintf(stderr, "regione:%s \t(v:%lld,o:%lld)\n" , reg->subs->seq, dm->vid, dm->offset);
+                
+                // blocco per verificare corretto parsing del .ging
+                if (dm->vid < graph->vertex_list->size) {
+
+                    // prendo l'oggetto vertice dal grafo usando il vid come indice
+                    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[dm->vid];
+                    
+                    // stampo id del nodo e la sua string label del nodo in cui la regione ha fatto match
+                    fprintf(stderr, "   [Grafo Check] Nodo ID: %lld | Sequenza Nodo: %s\n", 
+                            v->id, v->label->seq);
+                    
+
+                    void *incoming_neighbors = NULL;
+                    // obbiettivo: stampare gli ID dei nodi predecessori a quello in cui la regione ha matchato. cerco l'ID del nodo attuale nella tabella dei vicini entranti
+                    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)dm->vid, &incoming_neighbors)) {
+                        gin_vector_t *preds = (gin_vector_t *)incoming_neighbors;
+                        
+                        fprintf(stderr, "   [Grafo Check] Predecessori del nodo %lld: ", dm->vid);
+                        
+                        if (preds->size == 0) {
+                            fprintf(stderr, "Nessuno (Nodo Sorgente)\n");
+                        } else {
+                            for (int_t p = 0; p < preds->size; p++) {
+                                // estraggo l'ID del predecessore dal vettore (cast da void* a integer)
+                                vid_t pred_id = (vid_t)(uintptr_t)preds->data[p];
+                                fprintf(stderr, "%lld ", pred_id);
+                            }
+                            fprintf(stderr, "\n");
+                        }
+                    }
+                }
+            }
+
+            gin_vector_free(decoded_matches); 
+        }
+    }
+}

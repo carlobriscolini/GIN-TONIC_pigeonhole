@@ -2130,6 +2130,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int return_code = 0;
 
     char *fref_path = NULL;
+    char *fgraph_path = NULL;
     char *finput_path = NULL;
     char *foutput_path = NULL;
     char *fcache_path = NULL;
@@ -2137,6 +2138,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     FILE *finput = stdin;
     FILE *foutput = stdout;
     FILE *fref = NULL;
+    FILE *fgraph = NULL;
     FILE *fcache = NULL;
 
     int_t num_threads = 1;
@@ -2158,6 +2160,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     static struct option options[] = {
             {"reference",  required_argument, NULL, 'r'},
+            {"graph",  required_argument, NULL, 'g'},
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
             {"cache"      ,required_argument, NULL, 'C'},
@@ -2168,10 +2171,14 @@ int gin_main_pigeonhole(int argc, char **argv) {
     };
     opterr = 0;
     int optindex,c;
-    while((c = getopt_long(argc, argv, "r:i:o:C:d:b:j:t:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:g:i:o:C:d:b:j:t:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': {
                 fref_path = optarg;
+                break;
+            }
+            case 'g': {
+                fgraph_path = optarg;
                 break;
             }
             case 'i': {
@@ -2249,6 +2256,28 @@ int gin_main_pigeonhole(int argc, char **argv) {
     fclose(fref);
 
     /**************************************************************************
+    * parsing del .ging
+    **************************************************************************/
+    gin_graph_t *graph = NULL;
+
+    // uso il nuovo parametro -g (il file .ging) per caricare il grafo
+    if (fgraph_path) {
+        FILE *f_ging = fopen(fgraph_path, "r");
+        if (!f_ging) {
+            fprintf(stderr, "Errore: impossibile aprire il file grafo %s\n", fgraph_path);
+            return -1;
+        }
+        
+        // legge il file riga per riga e costruisce l'oggetto graph
+        graph = ging_parse(f_ging); 
+        
+        fclose(f_ging);
+        fprintf(stderr, "[gin:query] Grafo caricato con successo (%lld nodi)\n", 
+                graph->vertex_list->size);
+    }
+    
+
+    /**************************************************************************
     * 2 - Parse the bitstream into data structures, by the end of this block
     * gin, gin_dec, gin_cache should be populated and gin_buf should be freed
     **************************************************************************/
@@ -2321,25 +2350,26 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     typedef struct query_task_ {
         gin_string_t *str;
-        int_t count;
         gin_vector_t *regions_found;
         int_t no_exact_maches;
     } query_task_t;
 
     typedef struct query_region {
-            int_t qo;
-            gin_string_t *subs;
-            int_t matching_count;
-            gin_vector_t *exact_matches;
-            gin_vector_t *partial_matches;
-            gin_gin_stats_t *stats;
-        } query_region_t;
+        int_t qo;
+        gin_string_t *subs;
+        int_t matching_count;
+        gin_vector_t *exact_matches;
+        gin_vector_t *partial_matches;
+        gin_gin_stats_t *stats;
+    } query_region_t;
 
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
 
-    gin_graph_t *graph = NULL;
-    gin_vector_t *permutation = NULL;
-    gin_gin_decode(gin, &graph, &permutation);
+
+
+    //    gin_gin_decode(gin, &graph, &permutation);
+
+
 
     bool exit_flag = false;
 
@@ -2359,7 +2389,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
             gin_vector_init(&tasks[i].regions_found, GIN_VECTOR_INIT_SIZE, NULL);
 
-            tasks[i].count = 0;
             queries_processed++;
             i++;
         }
@@ -2369,7 +2398,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
             if (!tasks[j].str) continue;
 
             int_t local_end = tasks[j].str->size;
-            int_t local_region_count = 0;
 
             for(int_t local_start = tasks[j].str->size - 1; local_start > -1; local_start--) {
 
@@ -2400,7 +2428,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
                     gin_vector_append(tasks[j].regions_found, reg);
 
-                    local_region_count++;
                     local_end = local_start;
 
                 } else {    
@@ -2411,7 +2438,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     free(current_stats);
                 }
             }
-            tasks[j].count = local_region_count;
 
             gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches);
         }
