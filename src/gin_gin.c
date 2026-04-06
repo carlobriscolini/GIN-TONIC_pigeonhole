@@ -1935,6 +1935,68 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 
 
 
+
+
+
+
+
+
+
+// verifico la parte a sinistra della regione nella query
+
+bool gin_gin_verify_backward(gin_graph_t *graph, vid_t vid, int_t offset_in_node, gin_string_t *query, int_t q_pos) {
+    if (q_pos <= 0) return true;
+
+    // recupero il nodo in cui la regione ha matchato
+    if (vid >= graph->vertex_list->size) return false;
+    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[vid];
+
+    // nel nodo possiamo verificare un numero di caratteri pari al minimo tra 
+    // i caratteri restanti nel nodo (a sinistra della regione nel caso del primo nodo, tutto il nodo altrimenti)
+    // e i caratteri della query restanti da verificare
+    int_t check_len = MIN2(offset_in_node, q_pos);
+
+    if (check_len > 0) {
+        // confrontiamo una parte di query con l'intera string label se la query rimanente è più lunga della string label
+        // confrnotiamo una parte di string label con l'intera query se la query rimanente è più corta della string label
+        const char *query_segment = query->seq + (q_pos - check_len);
+        const char *node_segment = v->label->seq + (offset_in_node - check_len);
+
+        if (memcmp(query_segment, node_segment, (size_t)check_len) != 0) {
+            return false; // abbiamo trovato un mismatch, questo percorso non è valido
+        }
+    }
+
+    // aggiorno quanta query mi rimane da verificare
+    int_t remaining_q = q_pos - check_len;
+
+    // se la query rimasta da cercare è nulla, ho finito, ho trovato un match 
+    if (remaining_q <= 0) return true;
+
+    // caso in cui la query continua ma la string label del nodo è finita, si passa a controllare la string label dei nodi predecessori
+    void *ptr_incoming = NULL;
+    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)vid, &ptr_incoming)) {
+        gin_vector_t *preds = (gin_vector_t *)ptr_incoming;
+        
+        if (preds->size == 0) return false; // Query non finita ma grafo terminato
+
+        // DFS sulle string label dei nodi predecessori (idea: farla ricorsiva -> se la query non finisce nel primo nodo predecessore
+        // si guardano i predecessori del predecessore, sempre con una DFS)
+        for (int_t p = 0; p < preds->size; p++) {
+            vid_t pred_id = (vid_t)(uintptr_t)preds->data[p];
+            gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_id];
+            
+            // ricorsione
+            if (gin_gin_verify_backward(graph, pred_id, v_pred->label->size, query, remaining_q)) {
+                return true; 
+            }
+        }
+    }
+
+    return false; // caso in cui nessun percorso ha portato a un match completo
+}
+
+
 typedef struct query_task_ {
     gin_string_t *str;
     gin_vector_t *regions_found;
@@ -1977,36 +2039,17 @@ void gin_gin_verify_task(
             for (int_t m = 0; m < decoded_matches->size; m++) {
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
                 fprintf(stderr, "regione:%s \t(v:%lld,o:%lld)\n" , reg->subs->seq, dm->vid, dm->offset);
-                
-                // blocco per verificare corretto parsing del .ging
-                if (dm->vid < graph->vertex_list->size) {
 
-                    // prendo l'oggetto vertice dal grafo usando il vid come indice
-                    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[dm->vid];
-                    
-                    // stampo id del nodo e la sua string label del nodo in cui la regione ha fatto match
-                    fprintf(stderr, "   [Grafo Check] Nodo ID: %lld | Sequenza Nodo: %s\n", 
-                            v->id, v->label->seq);
-                    
+                // verifico la parte a sinistra della regione nella query 
+                // oss: sto controllando che esista almeno un percorso nel grafo che la matchi (considerando la regione allineata)
+                // non sto contando quanti percorsi la matchano e dove questi iniziano
 
-                    void *incoming_neighbors = NULL;
-                    // obbiettivo: stampare gli ID dei nodi predecessori a quello in cui la regione ha matchato. cerco l'ID del nodo attuale nella tabella dei vicini entranti
-                    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)dm->vid, &incoming_neighbors)) {
-                        gin_vector_t *preds = (gin_vector_t *)incoming_neighbors;
-                        
-                        fprintf(stderr, "   [Grafo Check] Predecessori del nodo %lld: ", dm->vid);
-                        
-                        if (preds->size == 0) {
-                            fprintf(stderr, "Nessuno (Nodo Sorgente)\n");
-                        } else {
-                            for (int_t p = 0; p < preds->size; p++) {
-                                // estraggo l'ID del predecessore dal vettore (cast da void* a integer)
-                                vid_t pred_id = (vid_t)(uintptr_t)preds->data[p];
-                                fprintf(stderr, "%lld ", pred_id);
-                            }
-                            fprintf(stderr, "\n");
-                        }
-                    }
+                bool backward_ok = gin_gin_verify_backward(graph, dm->vid, dm->offset, task->str, reg->qo);
+
+                if (backward_ok) {
+                    fprintf(stderr, "   [MATCH] Parte sinistra verificata con successo!\n");
+                } else {
+                    fprintf(stderr, "NO MATCH\n");
                 }
             }
 

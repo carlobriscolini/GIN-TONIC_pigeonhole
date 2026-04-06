@@ -2257,6 +2257,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     /**************************************************************************
     * parsing del .ging
+    * necessario, l'indice DNA-FMI non ha la funzione di decoding implementata
     **************************************************************************/
     gin_graph_t *graph = NULL;
 
@@ -2272,8 +2273,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
         graph = ging_parse(f_ging); 
         
         fclose(f_ging);
-        fprintf(stderr, "[gin:query] Grafo caricato con successo (%lld nodi)\n", 
-                graph->vertex_list->size);
     }
     
 
@@ -2439,7 +2438,9 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 }
             }
 
-            gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches);
+            if(fgraph_path) {
+                gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches);
+            }
         }
 
 
