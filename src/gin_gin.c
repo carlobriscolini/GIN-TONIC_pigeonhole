@@ -1940,67 +1940,10 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 
 
 
-
-
-// verifico la parte a sinistra della regione nella query
-
-bool gin_gin_verify_backward(gin_graph_t *graph, vid_t vid, int_t offset_in_node, gin_string_t *query, int_t q_pos) {
-    if (q_pos <= 0) return true;
-
-    // recupero il nodo in cui la regione ha matchato
-    if (vid >= graph->vertex_list->size) return false;
-    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[vid];
-
-    // nel nodo possiamo verificare un numero di caratteri pari al minimo tra 
-    // i caratteri restanti nel nodo (a sinistra della regione nel caso del primo nodo, tutto il nodo altrimenti)
-    // e i caratteri della query restanti da verificare
-    int_t check_len = MIN2(offset_in_node, q_pos);
-
-    if (check_len > 0) {
-        // confrontiamo una parte di query con l'intera string label se la query rimanente è più lunga della string label
-        // confrnotiamo una parte di string label con l'intera query se la query rimanente è più corta della string label
-        const char *query_segment = query->seq + (q_pos - check_len);
-        const char *node_segment = v->label->seq + (offset_in_node - check_len);
-
-        if (memcmp(query_segment, node_segment, (size_t)check_len) != 0) {
-            return false; // abbiamo trovato un mismatch, questo percorso non è valido
-        }
-    }
-
-    // aggiorno quanta query mi rimane da verificare
-    int_t remaining_q = q_pos - check_len;
-
-    // se la query rimasta da cercare è nulla, ho finito, ho trovato un match 
-    if (remaining_q <= 0) return true;
-
-    // caso in cui la query continua ma la string label del nodo è finita, si passa a controllare la string label dei nodi predecessori
-    void *ptr_incoming = NULL;
-    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)vid, &ptr_incoming)) {
-        gin_vector_t *preds = (gin_vector_t *)ptr_incoming;
-        
-        if (preds->size == 0) return false; // Query non finita ma grafo terminato
-
-        // DFS sulle string label dei nodi predecessori (idea: farla ricorsiva -> se la query non finisce nel primo nodo predecessore
-        // si guardano i predecessori del predecessore, sempre con una DFS)
-        for (int_t p = 0; p < preds->size; p++) {
-            vid_t pred_id = (vid_t)(uintptr_t)preds->data[p];
-            gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_id];
-            
-            // ricorsione
-            if (gin_gin_verify_backward(graph, pred_id, v_pred->label->size, query, remaining_q)) {
-                return true; 
-            }
-        }
-    }
-
-    return false; // caso in cui nessun percorso ha portato a un match completo
-}
-
-
 typedef struct query_task_ {
     gin_string_t *str;
     gin_vector_t *regions_found;
-    int_t no_exact_maches;
+    gin_vector_t *final_matches;
 } query_task_t;
 typedef struct query_region {
     int_t qo;
@@ -2011,49 +1954,175 @@ typedef struct query_region {
     gin_gin_stats_t *stats;
 } query_region_t;
 
-// da aggiungere int _t max_errors
+
+
+
+
+
+
+// verifico la parte a destra della regione nella query
+
+bool gin_gin_verify_forward(gin_graph_t *graph, vid_t vid, int_t offset_in_node, gin_string_t *query, int_t q_pos) {
+    // caso base: abbiamo verificato tutta la query fino alla fine?
+    if (q_pos >= query->size) return true;
+
+    // recupero il nodo
+    if (vid >= graph->vertex_list->size) return false;
+    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[vid];
+
+    // contollo quanta string label e read rimangono
+    int_t available_in_node = v->label->size - offset_in_node;
+    int_t remaining_query = query->size - q_pos;
+
+    // posso verificare la query rimanente oppure la string label è troppo corta?
+    int_t check_len = MIN2(available_in_node, remaining_query);
+
+    if (check_len > 0) {
+        const char *query_segment = query->seq + q_pos;
+        const char *node_segment = v->label->seq + offset_in_node;
+
+        if (memcmp(query_segment, node_segment, (size_t)check_len) != 0) {
+            return false; // mismatch
+        }
+    }
+
+    // aggiorno a che offset nella read sono arrivato
+    int_t next_q_pos = q_pos + check_len;
+
+    // caso in cui la query è finita, ritonro che è stato trovato un match per la parte destra
+    if (next_q_pos >= query->size) return true;
+
+    // se la query continua ma il nodo è finito si passa ai vicini uscenti
+    void *ptr_outgoing = NULL;
+    if (gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)vid, &ptr_outgoing)) {
+        gin_vector_t *neighbors = (gin_vector_t *)ptr_outgoing;
+        
+        if (neighbors->size == 0) return false;
+
+        for (int_t n = 0; n < neighbors->size; n++) {
+            vid_t next_vid = (vid_t)(uintptr_t)neighbors->data[n];
+            
+            // ricorsione, nel prossimo nodo partiamo sempre dall'offset 0 (inizio string label del nodo successore)
+            if (gin_gin_verify_forward(graph, next_vid, 0, query, next_q_pos)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
+
+void gin_gin_verify_backward(gin_graph_t *graph, vid_t vid, int_t offset_in_node, query_task_t *task, int_t q_pos) {
+    // check se abbiamo raggiunto l'inizio della query
+    if (q_pos <= 0) {
+        gin_decoded_match_t *m = NULL;
+        gin_decoded_match_init(&m, vid, offset_in_node);
+        gin_vector_append(task->final_matches, m);
+        return; 
+    }
+
+    if (vid >= graph->vertex_list->size) return;
+    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[vid];
+
+    int_t check_len = MIN2(offset_in_node, q_pos);
+    if (check_len > 0) {
+        const char *query_segment = task->str->seq + (q_pos - check_len);
+        const char *node_segment = v->label->seq + (offset_in_node - check_len);
+
+        if (memcmp(query_segment, node_segment, (size_t)check_len) != 0) {
+            return; // mismatch
+        }
+    }
+
+    int_t remaining_q = q_pos - check_len;
+    if (remaining_q <= 0) {
+        // continua la ricorsione per arrivare al caso base q_pos == 0
+        gin_gin_verify_backward(graph, vid, offset_in_node - check_len, task, 0);
+        return;
+    }
+
+    // verifica ricorsiva su tutti i predecessori
+    void *ptr_incoming = NULL;
+    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)vid, &ptr_incoming)) {
+        gin_vector_t *preds = (gin_vector_t *)ptr_incoming;
+        for (int_t p = 0; p < preds->size; p++) {
+            vid_t pred_id = (vid_t)(uintptr_t)preds->data[p];
+            gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_id];
+            gin_gin_verify_backward(graph, pred_id, v_pred->label->size, task, remaining_q);
+        }
+    }
+}
+
+
+
+
+
 // gin_dfmi_decode per la decodifica dell'indice non ancora implementato -> passo .ging come argomento e lo parso in gin.c
 void gin_gin_verify_task(
-    gin_gin_t *gin,
-    gin_graph_t *graph,
-    gin_gin_decoder_t *dec,
-    query_task_t *task,
-    int_t max_matches,
-    int_t max_errors
+    gin_gin_t *gin, gin_graph_t *graph, gin_gin_decoder_t *dec,
+    query_task_t *task, int_t max_matches, int_t max_errors
 ) {
-    // itero su ogni regione trovata 
+    // itero su regioni e poi match decodificati
     for (int_t r = 0; r < task->regions_found->size; r++) {
         query_region_t *reg = (query_region_t *)task->regions_found->data[r];
-        
-        // itero su ogni exact match (intervalli SA del fork) della regione
         for (int_t f = 0; f < reg->exact_matches->size; f++) {
             gin_fork_node_t *fork = (gin_fork_node_t *)reg->exact_matches->data[f];
-            
-            // decodifico l'intervallo SA in un vettore di match (vid (= id nodo), offset)
             gin_vector_t *decoded_matches = NULL;
             gin_gin_decoder_decode_one(dec, fork->sa_lo, fork->sa_hi, max_matches, &decoded_matches);
             
             if (!decoded_matches) continue;
 
-            // itero su ogni match trovato della regione per verficarlo
             for (int_t m = 0; m < decoded_matches->size; m++) {
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
-                fprintf(stderr, "regione:%s \t(v:%lld,o:%lld)\n" , reg->subs->seq, dm->vid, dm->offset);
+                // catena: backward poi forward poi append
+                // controllo se la parte della query a destra della regione matcha
+                int_t seed_len = reg->subs->size;
+                bool forward_ok = gin_gin_verify_forward(graph, dm->vid, dm->offset + seed_len, task->str, reg->qo + seed_len);
 
-                // verifico la parte a sinistra della regione nella query 
-                // oss: sto controllando che esista almeno un percorso nel grafo che la matchi (considerando la regione allineata)
-                // non sto contando quanti percorsi la matchano e dove questi iniziano
-
-                bool backward_ok = gin_gin_verify_backward(graph, dm->vid, dm->offset, task->str, reg->qo);
-
-                if (backward_ok) {
-                    fprintf(stderr, "   [MATCH] Parte sinistra verificata con successo!\n");
-                } else {
-                    fprintf(stderr, "NO MATCH\n");
+                if (forward_ok) {
+                    // solo se la destra è ok esploro tutte le strade a sinistra
+                    gin_gin_verify_backward(graph, dm->vid, dm->offset, task, reg->qo);
                 }
             }
-
             gin_vector_free(decoded_matches); 
         }
+        gin_vector_free(reg->exact_matches);
+        gin_vector_free(reg->partial_matches);
+        gin_string_free(reg->subs);
+        if (reg->stats) free(reg->stats);
+        free(reg);
     }
+
+    // deduplicazione
+    if (task->final_matches->size > 1) {
+        qsort(task->final_matches->data, task->final_matches->size, sizeof(void *), 
+              (int (*)(const void *, const void *))gin_decoded_match_comp);
+
+        int_t unique_count = 1;
+        for (int_t i = 1; i < task->final_matches->size; i++) {
+            gin_decoded_match_t *m_curr = (gin_decoded_match_t *)task->final_matches->data[i];
+            gin_decoded_match_t *m_prev = (gin_decoded_match_t *)task->final_matches->data[unique_count - 1];
+
+            if (m_curr->vid == m_prev->vid && m_curr->offset == m_prev->offset) {
+                gin_decoded_match_free(m_curr);
+            } else {
+                task->final_matches->data[unique_count++] = m_curr;
+            }
+        }
+        task->final_matches->size = unique_count;
+    }
+
+    // output
+    for (int_t i = 0; i < task->final_matches->size; i++) {
+        gin_decoded_match_t *m = (gin_decoded_match_t *)task->final_matches->data[i];
+        printf("FINAL_MATCH\t%s\tNode:%lld\tOffset:%lld\n", 
+               task->str->seq, (long long)m->vid, (long long)m->offset);
+    }
+
+    gin_vector_free(task->final_matches); 
+    gin_vector_free(task->regions_found);
+    gin_string_free(task->str);
+    task->str = NULL;
 }
