@@ -107,7 +107,8 @@ add_subdirectory(${PROJECT_EXTERN_DIR}/)
 
 #add_library(gin_lib SHARED ${C_FILES} ${H_FILES})
 add_library(gin_lib_static STATIC ${C_FILES} ${H_FILES})
-
+include_directories(/home/brisko/Scrivania/abPOA/include)
+link_directories(/home/brisko/Scrivania/abPOA/lib)
 # Specify where the project should look for headers
 #target_include_directories(
 #    gin_lib PUBLIC ${PROJECT_HEADER_DIR}
@@ -127,7 +128,7 @@ target_include_directories(
 target_link_libraries(gin_lib_static PUBLIC divsufsort-gin)
 #target_link_libraries(gin_lib PUBLIC divsufsort64)
 target_link_libraries(gin_lib_static PUBLIC divsufsort64-gin)
-
+target_link_libraries(gin_lib_static PUBLIC abpoa z m)
 # math
 #target_link_libraries(gin_lib PUBLIC m)
 target_link_libraries(gin_lib_static PUBLIC m)

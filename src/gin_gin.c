@@ -17,7 +17,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
+#include "abpoa.h"
 #include "gin_gin.h"
 #ifdef GIN_SDSL
 #include "../wrapper/sdsl_wrapper.h"
@@ -1940,11 +1940,17 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 
 
 
+
+
+
+
+
 typedef struct query_task_ {
     gin_string_t *str;
     gin_vector_t *regions_found;
     gin_vector_t *final_matches;
 } query_task_t;
+
 typedef struct query_region {
     int_t qo;
     gin_string_t *subs;
@@ -1954,117 +1960,153 @@ typedef struct query_region {
     gin_gin_stats_t *stats;
 } query_region_t;
 
+// --- STRUTTURE BFS ---
+typedef struct {
+    vid_t vid;
+    int_t dist_from_seed;
+} bfs_node_t;
 
+typedef struct {
+    gin_vector_t *nodes; 
+} local_subgraph_t;
 
+local_subgraph_t* local_subgraph_init() {
+    local_subgraph_t *sub = malloc(sizeof(local_subgraph_t));
+    sub->nodes = NULL; // FIX MEMORIA: Puliamo la memoria sporca di malloc
+    gin_vector_init(&sub->nodes, 16, NULL);
+    return sub;
+}
 
+void local_subgraph_free(local_subgraph_t *sub) {
+    gin_vector_free(sub->nodes);
+    free(sub);
+}
 
+// BFS -> alla fine avremo un vettore popolato con una lista di ID di nodi, questi formano una bolla locale attorno al seme
+void extract_subgraph_bfs(
+    gin_graph_t *graph, 
+    vid_t seed_vid, 
+    int_t seed_offset,
+    int_t max_dist, 
+    int direction, 
+    gin_table_t *visited_nodes, 
+    local_subgraph_t *subgraph
+) {
+    gin_vector_t *queue = NULL; // FIX MEMORIA
+    gin_vector_init(&queue, 16, NULL);
 
+    bfs_node_t *start = malloc(sizeof(bfs_node_t));
+    start->vid = seed_vid;
+    start->dist_from_seed = 0;
+    gin_vector_append(queue, start);
 
-// verifico la parte a destra della regione nella query
-
-bool gin_gin_verify_forward(gin_graph_t *graph, vid_t vid, int_t offset_in_node, gin_string_t *query, int_t q_pos) {
-    // caso base: abbiamo verificato tutta la query fino alla fine?
-    if (q_pos >= query->size) return true;
-
-    // recupero il nodo
-    if (vid >= graph->vertex_list->size) return false;
-    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[vid];
-
-    // contollo quanta string label e read rimangono
-    int_t available_in_node = v->label->size - offset_in_node;
-    int_t remaining_query = query->size - q_pos;
-
-    // posso verificare la query rimanente oppure la string label è troppo corta?
-    int_t check_len = MIN2(available_in_node, remaining_query);
-
-    if (check_len > 0) {
-        const char *query_segment = query->seq + q_pos;
-        const char *node_segment = v->label->seq + offset_in_node;
-
-        if (memcmp(query_segment, node_segment, (size_t)check_len) != 0) {
-            return false; // mismatch
-        }
+    void *dummy;
+    if (!gin_table_lookup(visited_nodes, (void *)(uintptr_t)seed_vid, &dummy)) {
+        gin_table_insert(visited_nodes, (void *)(uintptr_t)seed_vid, (void *)1);
+        gin_vector_append(subgraph->nodes, (void *)(uintptr_t)seed_vid);
     }
 
-    // aggiorno a che offset nella read sono arrivato
-    int_t next_q_pos = q_pos + check_len;
+    int_t head = 0; 
 
-    // caso in cui la query è finita, ritonro che è stato trovato un match per la parte destra
-    if (next_q_pos >= query->size) return true;
+    while (head < queue->size) {
+        bfs_node_t *curr = (bfs_node_t *)queue->data[head++];
 
-    // se la query continua ma il nodo è finito si passa ai vicini uscenti
-    void *ptr_outgoing = NULL;
-    if (gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)vid, &ptr_outgoing)) {
-        gin_vector_t *neighbors = (gin_vector_t *)ptr_outgoing;
-        
-        if (neighbors->size == 0) return false;
+        if (curr->vid >= graph->vertex_list->size) continue;
+        gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[curr->vid];
 
-        for (int_t n = 0; n < neighbors->size; n++) {
-            vid_t next_vid = (vid_t)(uintptr_t)neighbors->data[n];
+        int_t consumed_in_this_node;
+        if (curr->vid == seed_vid) {
+            if (direction == 1) {
+                consumed_in_this_node = v->label->size - seed_offset;
+            } else {
+                consumed_in_this_node = seed_offset;
+            }
+        } else {
+            consumed_in_this_node = v->label->size;
+        }
+
+        int_t new_dist = curr->dist_from_seed + consumed_in_this_node;
+
+        if (new_dist > max_dist) continue;
+
+        gin_table_t *neighbors_table = direction ? graph->outgoing_neighbors : graph->incoming_neighbors;
+        void *ptr_neighbors = NULL;
+
+        if (gin_table_lookup(neighbors_table, (void *)(uintptr_t)curr->vid, &ptr_neighbors)) {
+            gin_vector_t *neighbors = (gin_vector_t *)ptr_neighbors;
             
-            // ricorsione, nel prossimo nodo partiamo sempre dall'offset 0 (inizio string label del nodo successore)
-            if (gin_gin_verify_forward(graph, next_vid, 0, query, next_q_pos)) {
-                return true;
+            for (int_t n = 0; n < neighbors->size; n++) {
+                vid_t next_vid = (vid_t)(uintptr_t)neighbors->data[n];
+
+                if (!gin_table_lookup(visited_nodes, (void *)(uintptr_t)next_vid, &dummy)) {
+                    gin_table_insert(visited_nodes, (void *)(uintptr_t)next_vid, (void *)1);
+                    gin_vector_append(subgraph->nodes, (void *)(uintptr_t)next_vid);
+                    
+                    bfs_node_t *next_node = malloc(sizeof(bfs_node_t));
+                    next_node->vid = next_vid;
+                    next_node->dist_from_seed = new_dist; 
+                    gin_vector_append(queue, next_node);
+                }
             }
         }
     }
 
-    return false;
+    for (int_t i = 0; i < queue->size; i++) free(queue->data[i]);
+    gin_vector_free(queue);
 }
 
-
-
-void gin_gin_verify_backward(gin_graph_t *graph, vid_t vid, int_t offset_in_node, query_task_t *task, int_t q_pos) {
-    // check se abbiamo raggiunto l'inizio della query
-    if (q_pos <= 0) {
-        gin_decoded_match_t *m = NULL;
-        gin_decoded_match_init(&m, vid, offset_in_node);
-        gin_vector_append(task->final_matches, m);
-        return; 
-    }
-
-    if (vid >= graph->vertex_list->size) return;
-    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[vid];
-
-    int_t check_len = MIN2(offset_in_node, q_pos);
-    if (check_len > 0) {
-        const char *query_segment = task->str->seq + (q_pos - check_len);
-        const char *node_segment = v->label->seq + (offset_in_node - check_len);
-
-        if (memcmp(query_segment, node_segment, (size_t)check_len) != 0) {
-            return; // mismatch
-        }
-    }
-
-    int_t remaining_q = q_pos - check_len;
-    if (remaining_q <= 0) {
-        // continua la ricorsione per arrivare al caso base q_pos == 0
-        gin_gin_verify_backward(graph, vid, offset_in_node - check_len, task, 0);
-        return;
-    }
-
-    // verifica ricorsiva su tutti i predecessori
-    void *ptr_incoming = NULL;
-    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)vid, &ptr_incoming)) {
-        gin_vector_t *preds = (gin_vector_t *)ptr_incoming;
-        for (int_t p = 0; p < preds->size; p++) {
-            vid_t pred_id = (vid_t)(uintptr_t)preds->data[p];
-            gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_id];
-            gin_gin_verify_backward(graph, pred_id, v_pred->label->size, task, remaining_q);
-        }
-    }
+// --- FUNZIONI DI SUPPORTO abPOA ---
+int compare_vids(const void *a, const void *b) {
+    vid_t va = (vid_t)(uintptr_t)*(void **)a;
+    vid_t vb = (vid_t)(uintptr_t)*(void **)b;
+    return (va > vb) ? 1 : ((va < vb) ? -1 : 0);
 }
 
+int find_vid_index(gin_vector_t *nodes, vid_t target) {
+    for (int_t i = 0; i < nodes->size; i++) {
+        if ((vid_t)(uintptr_t)nodes->data[i] == target) return i;
+    }
+    return -1; 
+}
+
+uint8_t* encode_dna_for_abpoa(const char* seq, int_t len) {
+    uint8_t *encoded = malloc(len * sizeof(uint8_t));
+    for (int_t i = 0; i < len; i++) {
+        switch (seq[i]) {
+            case 'A': case 'a': encoded[i] = 0; break;
+            case 'C': case 'c': encoded[i] = 1; break;
+            case 'G': case 'g': encoded[i] = 2; break;
+            case 'T': case 't': encoded[i] = 3; break;
+            default: encoded[i] = 4; break; 
+        }
+    }
+    return encoded;
+}
+
+typedef struct {
+    int start_id; 
+    int end_id;   
+} abpoa_node_map_t;
 
 
+// --- MAIN VERIFY TASK ---
+extern gin_fstruct_t prm_fstruct; 
 
-
-// gin_dfmi_decode per la decodifica dell'indice non ancora implementato -> passo .ging come argomento e lo parso in gin.c
 void gin_gin_verify_task(
     gin_gin_t *gin, gin_graph_t *graph, gin_gin_decoder_t *dec,
     query_task_t *task, int_t max_matches, int_t max_errors
 ) {
-    // itero su regioni e poi match decodificati
+    // per tracciare il miglior match della read per poi stampare solo il match migliore
+    int best_score = -1;
+    vid_t best_vid = 0;
+    int best_offset = 0;
+    int found_any = 0;
+
+    // hash table che verrà utilizzata per evitare di processare più volte lo stesso identico 
+    // punto del grafo se viene trovato da regioni diverse della stessa read
+    gin_table_t *processed_origins = NULL;
+    gin_table_init(&processed_origins, 128, &prm_fstruct, NULL);
+
     for (int_t r = 0; r < task->regions_found->size; r++) {
         query_region_t *reg = (query_region_t *)task->regions_found->data[r];
         for (int_t f = 0; f < reg->exact_matches->size; f++) {
@@ -2076,53 +2118,144 @@ void gin_gin_verify_task(
 
             for (int_t m = 0; m < decoded_matches->size; m++) {
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
-                // catena: backward poi forward poi append
-                // controllo se la parte della query a destra della regione matcha
+                
+                // utilizzoo una chiave, 64 bit con detro il vid per i 32 bit alti e l'offset nei 32 bassi
+                // se la chiave è già nella hash table processed_origins facciamo continue.
+                int_t virt_offset = dm->offset - reg->qo;
+                uint64_t origin_key = ((uint64_t)dm->vid << 32) | (uint32_t)virt_offset;
+                void *dummy;
+                if (gin_table_lookup(processed_origins, (void *)(uintptr_t)origin_key, &dummy)) continue;
+                gin_table_insert(processed_origins, (void *)(uintptr_t)origin_key, (void *)1);
+
+                // calcolo di quanta query rimane a destra / sinistra della regione nella read. Aggiunto max_errors per le delezioni
                 int_t seed_len = reg->subs->size;
-                bool forward_ok = gin_gin_verify_forward(graph, dm->vid, dm->offset + seed_len, task->str, reg->qo + seed_len);
+                int_t dist_r = (task->str->size - (reg->qo + seed_len)) + max_errors;
+                int_t dist_l = reg->qo + max_errors;
 
-                if (forward_ok) {
-                    // solo se la destra è ok esploro tutte le strade a sinistra
-                    gin_gin_verify_backward(graph, dm->vid, dm->offset, task, reg->qo);
+                local_subgraph_t *subgraph = local_subgraph_init();
+                gin_table_t *visited_nodes = NULL;
+                gin_table_init(&visited_nodes, 128, &prm_fstruct, NULL); 
+
+                // si lancia la subgraph due volte, una verso destra quindi forward e una verso sinistra quindi backward
+                // il risultato sarà un vettore (un subgraph) per ogni match che troviamo contenente la lista di ID composta dal nodo di partenza e tutti
+                // i nodi vicini che la BFS ha visitato mentre si espandeva
+                extract_subgraph_bfs(graph, dm->vid, dm->offset + seed_len, dist_r, 1, visited_nodes, subgraph);
+                extract_subgraph_bfs(graph, dm->vid, dm->offset, dist_l, 0, visited_nodes, subgraph);
+
+                // ordino gli ID dei nodi in modo crescente
+                qsort(subgraph->nodes->data, subgraph->nodes->size, sizeof(void *), compare_vids);
+
+                // abPOA inizializzazione
+                // align_mode = 1 per allineamento locale (invece di globale)
+                abpoa_para_t *abpt = abpoa_init_para();
+                abpt->align_mode = 1; 
+                abpoa_post_set_para(abpt);
+                abpoa_t *ab = abpoa_init();
+                // siccome in abPOA, ogni base è un nodo a sè, questo array serve a ricordare che il nodo GIN 105 inizia nel nodo abPOA X e finisce in abPOA Y
+                abpoa_node_map_t *ab_ids = malloc(subgraph->nodes->size * sizeof(abpoa_node_map_t));
+
+
+                // itera sui nodi del subgraph trovati con la BFS
+                for (int_t n = 0; n < subgraph->nodes->size; n++) {
+                    // gin vertex prende il nodo reale del grafo originale e encode_dna_for_abpoa traduce la stringa in numeri.
+                    gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[(vid_t)(uintptr_t)subgraph->nodes->data[n]];
+                    uint8_t *enc = encode_dna_for_abpoa(v->label->seq, v->label->size);
+                    int first = -1, last = -1;
+                    // si itera su ogni base del nodo e si aggiunge un nodo in abPOA per ogni base.
+                    for(int_t i = 0; i < v->label->size; i++) {
+                        int curr = abpoa_add_graph_node(ab->abg, enc[i]);
+                        if (i == 0) first = curr;
+                        // nel grafo abPOA non esiste un ordine delle lettere (nodi abPOA) fino a quando non si construiscono archi
+                        // questa funzione serve prorio a fare ciò, dice collega la lettera che ho appena creato, curr, a quella creata nel giro precedente, last
+                        if (last != -1) abpoa_add_graph_edge(ab->abg, last, curr, 1, 1, 0, 0, 0, 0, 0);
+                        last = curr;
+                    }
+                    // riferimenti di dove inizia e finisce il nodo GIN nel grafo abPOA
+                    // quando dovremo collegare i GIN nodi tra loro, sapremo che per collegare 104 con 106
+                    // ci basterà un arco tra l'ultima lettera del nodo 104 e la prima lettera del nodo 106
+                    ab_ids[n].start_id = first; 
+                    ab_ids[n].end_id = last;
+                    free(enc);
                 }
+
+                // alla fine della passata A avremo trasformato un grafo di sequenze in un grafo di caratteri. Senza questo abPOA non
+                // potrebbe applicare l'algoritmo di DP lettera per lettera per calcolare lo score
+
+
+                // liste di contatori inizializzate a 0. La prima conta quantia archi entrano in un nodo e la seconda quanti ne escono.
+                int *in_d = calloc(subgraph->nodes->size, sizeof(int));
+                int *out_d = calloc(subgraph->nodes->size, sizeof(int));
+                // itero sui nodi del subgraph
+                for (int_t n = 0; n < subgraph->nodes->size; n++) {
+                    void *ptr_out = NULL;
+                    // controlliamo a quali nodi è collegato il nodo del subgraph su cui stiamo iterando
+                    if (gin_table_lookup(graph->outgoing_neighbors, subgraph->nodes->data[n], &ptr_out)) {
+                        gin_vector_t *neighs = (gin_vector_t *)ptr_out;
+                        for (int_t e = 0; e < neighs->size; e++) {
+                            int d_idx = find_vid_index(subgraph->nodes, (vid_t)(uintptr_t)neighs->data[e]);
+                            // accetto l'arco solo se va da un nodo con ID più piccolo ad un nodo con ID più grande.
+                            // fondamentale perchè abPOA non sa gestire cicli durante l'allineamento, cosa che i grafi genomici possono avere.
+                            if (d_idx > n) {
+                                // quello che succede qui è prendi l'ID dell'ultima lettera del nodo corrente e collegalo alla prima
+                                // lettera del nodo successivo. Questo permette di avere la reference come se fosse una sequenza lineare
+                                abpoa_add_graph_edge(ab->abg, ab_ids[n].end_id, ab_ids[d_idx].start_id, 1, 1, 0, 0, 0, 0, 0);
+                                out_d[n]++; in_d[d_idx]++;
+                            }
+                        }
+                    }
+                }
+
+                // alla fine di questo blocco non abbiamo più segmenti di DNA isolati, ma una rete di percorsi percorribili (della reference)
+
+                // problema: nel subgraph si potrebbero avere più nodi che non hanno genitori (perchè erano all'inizio del pezzetto estratto) o senza figli
+                // soluzione: collega i nodi senza padre alla sorgente e i nodi senza i figli al pozzo.
+                for (int_t n = 0; n < subgraph->nodes->size; n++) {
+                    if (in_d[n] == 0) abpoa_add_graph_edge(ab->abg, ABPOA_SRC_NODE_ID, ab_ids[n].start_id, 1, 1, 0, 0, 0, 0, 0);
+                    if (out_d[n] == 0) abpoa_add_graph_edge(ab->abg, ab_ids[n].end_id, ABPOA_SINK_NODE_ID, 1, 1, 0, 0, 0, 0, 0);
+                }
+                free(in_d); free(out_d);
+
+                // questa funzione ordina i nodi in una sequenza logica, dove ogni freccia punta solo in avanti
+                // questo perchè per l'allineamento tramite DP è necessario saper quale viene prima e quale dopo.
+                abpoa_topological_sort(ab->abg, abpt);
+                // come abbiamo fatto per i nodi del grafo, traduciamo le read in numeri, ovvero il formato numerico di abPOA. e.g. ATGC = 0123
+                uint8_t *enc_q = encode_dna_for_abpoa(task->str->seq, task->str->size);
+                abpoa_res_t res; res.graph_cigar = NULL; res.n_cigar = 0;
+                // questo è l'allineamento vero e proprio. Prende la read e la fa scorrere sopra il mini-grafo che abbiamo costruito
+                abpoa_align_sequence_to_graph(ab, abpt, enc_q, task->str->size, &res);
+
+                // a questo punto res contiene: best_score = punteggio massimo, node_s = ID del nodo abPOA dove inizia il match
+                // e graph_cigar che è la sequenza di operazioni (match, inserzioni e delezioni) necessarie per trasformare la read nel riferimento
+
+                // vogliamo solo il miglior match per ogni read
+                if (res.best_score > best_score) {
+                    best_score = res.best_score;
+                    found_any = 1;
+                    for (int_t n = 0; n < subgraph->nodes->size; n++) {
+                        if (res.node_s >= ab_ids[n].start_id && res.node_s <= ab_ids[n].end_id) {
+                            best_vid = (vid_t)(uintptr_t)subgraph->nodes->data[n];
+                            best_offset = res.node_s - ab_ids[n].start_id;
+                            break;
+                        }
+                    }
+                }
+
+                // pulizia
+                if (res.n_cigar > 0 && res.graph_cigar) free(res.graph_cigar);
+                free(enc_q); abpoa_free(ab); abpoa_free_para(abpt); free(ab_ids);
+                local_subgraph_free(subgraph); gin_table_free(visited_nodes);
             }
-            gin_vector_free(decoded_matches); 
+            gin_vector_free(decoded_matches);
         }
-        gin_vector_free(reg->exact_matches);
-        gin_vector_free(reg->partial_matches);
-        gin_string_free(reg->subs);
-        if (reg->stats) free(reg->stats);
-        free(reg);
     }
 
-    // deduplicazione
-    if (task->final_matches->size > 1) {
-        qsort(task->final_matches->data, task->final_matches->size, sizeof(void *), 
-              (int (*)(const void *, const void *))gin_decoded_match_comp);
-
-        int_t unique_count = 1;
-        for (int_t i = 1; i < task->final_matches->size; i++) {
-            gin_decoded_match_t *m_curr = (gin_decoded_match_t *)task->final_matches->data[i];
-            gin_decoded_match_t *m_prev = (gin_decoded_match_t *)task->final_matches->data[unique_count - 1];
-
-            if (m_curr->vid == m_prev->vid && m_curr->offset == m_prev->offset) {
-                gin_decoded_match_free(m_curr);
-            } else {
-                task->final_matches->data[unique_count++] = m_curr;
-            }
-        }
-        task->final_matches->size = unique_count;
+    // STAMPA FINALE: Un solo risultato per Read
+    if (found_any) {
+        printf("[BEST MATCH] Read: %s\n", task->str->seq);
+        printf("[BEST MATCH] node_id: %lld, offset: %d, score: %d\n", 
+        (long long)best_vid + 101, best_offset, best_score);
+        printf("------------------------------------------\n");
     }
 
-    // output
-    for (int_t i = 0; i < task->final_matches->size; i++) {
-        gin_decoded_match_t *m = (gin_decoded_match_t *)task->final_matches->data[i];
-        printf("FINAL_MATCH\t%s\tNode:%lld\tOffset:%lld\n", 
-               task->str->seq, (long long)m->vid, (long long)m->offset);
-    }
-
-    gin_vector_free(task->final_matches); 
-    gin_vector_free(task->regions_found);
-    gin_string_free(task->str);
-    task->str = NULL;
+    gin_table_free(processed_origins);
 }
