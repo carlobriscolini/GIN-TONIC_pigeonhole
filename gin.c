@@ -2370,8 +2370,14 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
 
 
-    bool exit_flag = false;
 
+    FILE *main_log_file = fopen("alignment_log.txt", "w");
+    if (!main_log_file) {
+        fprintf(stderr, "Impossibile aprire alignment_log.txt\n");
+        return;
+    }
+
+    bool exit_flag = false;
     
     clock_gettime(CLOCK_REALTIME, &t1);
     while(true) {
@@ -2394,7 +2400,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
-        #pragma omp parallel for default(none) shared(tasks, i, gin, gin_cache, max_forks, threshold)
+        // #pragma omp parallel for default(none) shared(tasks, i, gin, gin_cache, max_forks, threshold)
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
 
@@ -2441,7 +2447,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
 
             if(fgraph_path) {
-                gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches);
+                gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches, 20, main_log_file);
             }
         }
         if(exit_flag)
@@ -2455,10 +2461,16 @@ int gin_main_pigeonhole(int argc, char **argv) {
     /**************************************************************************
     * 4 - Free all data structures and return
     **************************************************************************/
-    fprintf(foutput,"%s\n", GIN_MAIN_QUERY_EXIT_PROMPT);
-    fprintf(foutput,"total queries finding time: %lf seconds\n", total_execution_time);
-    fprintf(foutput,"total cache build time: %lf seconds\n", cache_build_time);
-    fprintf(foutput,"cache depth: %lld\n", cache_depth);
+    fprintf(main_log_file, "\n==================================================\n");
+    fprintf(main_log_file, "STATISTICHE FINALI\n");
+    fprintf(main_log_file, "==================================================\n");
+    fprintf(main_log_file, "Total queries finding time: %lf seconds\n", total_execution_time);
+    fprintf(main_log_file, "Total cache build time: %lf seconds\n", cache_build_time);
+    fprintf(main_log_file, "Cache depth: %lld\n", (long long)cache_depth);
+    fprintf(main_log_file, "Queries processed: %lld\n", (long long)queries_processed);
+
+    fclose(main_log_file);
+
     if(fcache_path) {
         gin_gin_cache_free(gin_cache);
     }

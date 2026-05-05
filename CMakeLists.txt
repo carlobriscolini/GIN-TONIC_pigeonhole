@@ -41,6 +41,7 @@ set(C_FILES
     ${PROJECT_SOURCE_DIR}/gin_constraint_set.c
     ${PROJECT_SOURCE_DIR}/gin_annealing.c
     ${PROJECT_SOURCE_DIR}/gin_encoded_graph.c
+    ${PROJECT_WRAPPER_DIR}/theseus_wrapper.cpp
 )
 set(H_FILES
     ${PROJECT_HEADER_DIR}/gin_common.h
@@ -61,6 +62,7 @@ set(H_FILES
     ${PROJECT_HEADER_DIR}/rgfa_parser.h
     ${PROJECT_HEADER_DIR}/permutation_parser.h
     ${PROJECT_HEADER_DIR}/ging_parser.h
+    ${PROJECT_WRAPPER_DIR}/theseus_wrapper.h
 )
 
 ################################################################################
@@ -131,6 +133,9 @@ target_link_libraries(gin_lib_static PUBLIC divsufsort64-gin)
 # math
 #target_link_libraries(gin_lib PUBLIC m)
 target_link_libraries(gin_lib_static PUBLIC m)
+
+# theseus (libreria C++ per l'allineamento sui grafi)
+target_link_libraries(gin_lib_static PUBLIC theseus)
 
 #sdsl
 if(BUILD_DNA_FMI)

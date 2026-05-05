@@ -1944,11 +1944,21 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 
 
 
+#include "../wrapper/theseus_wrapper.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// =====================================================================
+// HELPER: Calcola dinamicamente l'overlap esatto tra due nodi
+// =====================================================================
+
 typedef struct query_task_ {
     gin_string_t *str;
     gin_vector_t *regions_found;
     gin_vector_t *final_matches;
 } query_task_t;
+
 typedef struct query_region {
     int_t qo;
     gin_string_t *subs;
@@ -1958,19 +1968,15 @@ typedef struct query_region {
     gin_gin_stats_t *stats;
 } query_region_t;
 
-
-// struttura per la coda della BFS, tiene traccia del nodo e della distanza percorsa finora
 typedef struct {
     vid_t vid;
     int_t dist_from_seed;
 } bfs_node_t;
 
-// struttura che conterrà i nodi validi estratti
 typedef struct {
-    gin_vector_t *nodes; // sarà un vettore di vid_t unici che compongono il sottografo
+    gin_vector_t *nodes; 
 } local_subgraph_t;
 
-// inizializzazione e pulizia del sottografo
 local_subgraph_t* local_subgraph_init() {
     local_subgraph_t *sub = malloc(sizeof(local_subgraph_t));
     gin_vector_init(&sub->nodes, 16, NULL);
@@ -1982,9 +1988,9 @@ void local_subgraph_free(local_subgraph_t *sub) {
     free(sub);
 }
 
-
-// BFS, direzione scelta tramite un int: 0 = Backward, 1 = Forward
-// seed_offset aggiunto per calcolare correttamente le distanze nel nodo di partenza
+// =====================================================================
+// BFS
+// =====================================================================
 void extract_subgraph_bfs(
     gin_graph_t *graph, 
     vid_t seed_vid, 
@@ -1994,64 +2000,82 @@ void extract_subgraph_bfs(
     gin_table_t *visited_nodes, 
     local_subgraph_t *subgraph
 ) {
+    // coda FIFO della BFS. 
     gin_vector_t *queue;
     gin_vector_init(&queue, 16, NULL);
 
+    // creo bfs_node che serve a tenere traccia della distanza percorsa dal seed e lo metto in coda per essere esplorato
     bfs_node_t *start = malloc(sizeof(bfs_node_t));
     start->vid = seed_vid;
     start->dist_from_seed = 0;
     gin_vector_append(queue, start);
 
+    // prima di aggiungere il nodo al subgraph, controlo se è già stato visitato (causa precedente chiamata o ciclicità del grafo)
+    // visited_nodes è l'hash table che tiene traccia dei nodi già visitati
     void *dummy;
     if (!gin_table_lookup(visited_nodes, (void *)(uintptr_t)seed_vid, &dummy)) {
+
+        // se il nodo è nuovo la aggiungo alla hash table dei visitati e al subgraph
         gin_table_insert(visited_nodes, (void *)(uintptr_t)seed_vid, (void *)1);
         gin_vector_append(subgraph->nodes, (void *)(uintptr_t)seed_vid);
     }
 
+    // utilizzo head come indice dei nodi da esplorare nella coda
     int_t head = 0; 
 
+    // fino a quando head non raggiunge la fine del vettore queue->size ci sono ancora nodi da esplorare
     while (head < queue->size) {
+        // estraggo il nodo corrente in curr ed incremento head
         bfs_node_t *curr = (bfs_node_t *)queue->data[head++];
 
+        // verifico che l'ID del nodo sia valido nel grafo
         if (curr->vid >= graph->vertex_list->size) continue;
         gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[curr->vid];
 
-        // calcolo della distanza consumata in questo specifico nodo
-        int_t consumed_in_this_node;
+        // se la distanza percorsa finora è già superiore al limite massimo, smetto di guardare i vicini di questo nodo
+        // il nodo corrente è nel subgraph ma non si deve andare oltre
+        if (curr->dist_from_seed >= max_dist) continue;
+
+        // calcolo le basi consumate
+        // caso verso destra (direction == 1): basi consumate pari a lunghezza totale della label del nodo - l'offset del seed nel nodo
+        // caso verso sinistra (direction == 0): basi consumate pari all'offset del seed del nodo
+        int_t consumed;
         if (curr->vid == seed_vid) {
-            if (direction == 1) {
-                // se forward: la distanza dall'offset alla fine del nodo
-                consumed_in_this_node = v->label->size - seed_offset;
-            } else {
-                // se backward: la distanza dall'offset all'inizio del nodo
-                consumed_in_this_node = seed_offset;
-            }
+            consumed = (direction == 1) ? (v->label->size - seed_offset) : seed_offset;
         } else {
-            // nodi successivi vengono attraversati per intero
-            consumed_in_this_node = v->label->size;
+            consumed = v->label->size;
         }
 
-        int_t new_dist = curr->dist_from_seed + consumed_in_this_node;
+        // aggiorno la distanza totale percorsa dal seme alla fine (se verso destra) / inizio (se verso sinistra) del nodo corrente
+        int_t next_dist = curr->dist_from_seed + consumed;
 
-        // se è esaurito lo spazio consentito (max_dist), ci fermiamo per questo ramo
-        if (new_dist > max_dist) continue;
-
+        // rendo la BFS bidirezionale, se direction è 1 (verso destra) guardo i vicini in uscita
+        // se direction è 0 (verso sinistra) guardo i vicini che entrano
         gin_table_t *neighbors_table = direction ? graph->outgoing_neighbors : graph->incoming_neighbors;
         void *ptr_neighbors = NULL;
 
+        // if per controllare se il nodo corrente ha dei vicini nella direzione che ci interessa
         if (gin_table_lookup(neighbors_table, (void *)(uintptr_t)curr->vid, &ptr_neighbors)) {
+            
+            // estraggo il vettore dei vicini
             gin_vector_t *neighbors = (gin_vector_t *)ptr_neighbors;
             
+            // itero su ogni vicino del nodo corrente
             for (int_t n = 0; n < neighbors->size; n++) {
                 vid_t next_vid = (vid_t)(uintptr_t)neighbors->data[n];
 
+                // filtro per evitare lloop, se un nodo è già stato visitato lo ignoro.
                 if (!gin_table_lookup(visited_nodes, (void *)(uintptr_t)next_vid, &dummy)) {
+
+                    // se il nodo è nuovo lo aggiungo alla hash table dei nodi visitati e al subgraphs
+                    // garantisce che ogni nodo appaia una sola volta nel GFA che daremo a theseus
                     gin_table_insert(visited_nodes, (void *)(uintptr_t)next_vid, (void *)1);
                     gin_vector_append(subgraph->nodes, (void *)(uintptr_t)next_vid);
                     
+                    // aggiungo il nodo vicino alla coda della BFS per essere esplorato a sua volta
                     bfs_node_t *next_node = malloc(sizeof(bfs_node_t));
                     next_node->vid = next_vid;
-                    next_node->dist_from_seed = new_dist;
+                    next_node->dist_from_seed = next_dist;
                     gin_vector_append(queue, next_node);
                 }
             }
@@ -2062,14 +2086,164 @@ void extract_subgraph_bfs(
     gin_vector_free(queue);
 }
 
+// =====================================================================
+// GFA
+// =====================================================================
+
+int_t calculate_overlap(const char *s1, size_t len1, const char *s2, size_t len2) {
+    
+    // overlap tra due nodi non può essere più lungo del nodo più corto 
+    int_t max_ovlp = (len1 < len2) ? len1 : len2;
+
+    // supponendo che non troveremo overlap più lunghi di 150, metto un limite a 150 per evitare confronti troppo lunghi
+    if (max_ovlp > 150) max_ovlp = 150; 
+
+    for (int_t i = max_ovlp; i > 0; i--) {
+        // confronto gli ultimi i caratteri di s1 con i primi i caratteri di s2, se sono uguali ritorno i come lunghezza dell'overlap
+        if (memcmp(s1 + len1 - i, s2, i) == 0) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// traformiamo la lista di nodi ottenuta dalla BFS in un file GFA da dare a theseus
+char* generate_gfa_from_subgraph(gin_graph_t *graph, local_subgraph_t *subgraph) {
+    size_t capacity = 4096;
+    size_t len = 0;
+    char *gfa = malloc(capacity);
+
+    // imposto il primo carattere come terminatore per rendere la stringa valida anche se vuota
+    gfa[0] = '\0';
+
+    // se si passa a theseus un GFA con solo nodi, senza archi, darebbe problemi
+    // se alla fine del ciclo la flag è ancora 0, allora aggiungo un arco finto
+    int added_any_link = 0;
+
+    // ciclo su tutti i nodi del subgraph generato dalla BFS
+    for (int_t n = 0; n < subgraph->nodes->size; n++) {
+        
+        // recupero l'ID e la label del nodo del subgraph
+        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[n];
+        gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[v_id];
+        
+        // prima di scrivere il nodo nel GFA controllo se c'è abbastanza spazio nella stringa, altrimenti rialloco spazio pari al doppio di quello necessario
+        size_t needed = len + v->label->size + 128;
+        if (needed > capacity) {
+            capacity = needed * 2;
+            gfa = realloc(gfa, capacity);
+        }
+        
+        // inizio la riga del GFA con "S" seguito dall'ID del nodo
+        // uso sprintf per aggiornare len con il numero di caratteri scritti
+        len += sprintf(gfa + len, "S\t%lld\t", (long long)v_id);
+
+        // filtro copiando solo le lettere A, T, C, G scartandoq ualsiasi altro carattere di controllo, questo perche i GFA devono avere una riga per ogni elemento
+        for (size_t i = 0; i < v->label->size; i++) {
+            char c = v->label->seq[i];
+            if (c != '\0' && c != '\n' && c != '\r') {
+                gfa[len++] = c;
+            }
+        }
+
+        // termino la riga del GFA e aggiungo un terminatore per rendere la stringa gfa valida
+        gfa[len++] = '\n';
+        gfa[len] = '\0';
+    }
+
+    // a questo punto la stringa gfa contiene le righe riguardanti nodi come    S   101    ACGTTA
+
+    // ora scriviamo gli archi
+    // itero su titti i nodi del subgraph
+    for (int_t n = 0; n < subgraph->nodes->size; n++) {
+
+        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[n];
+        gin_vertex_t *v_src = (gin_vertex_t *)graph->vertex_list->data[v_id]; 
+        
+        void *ptr_out = NULL;
+
+        // controllo se il nodo ha vicini in uscita dal grafo originale
+        if (gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)v_id, &ptr_out)) {
+
+            // neighs è il vettore dei vicini in uscita del nodo corrente
+            gin_vector_t *neighs = (gin_vector_t *)ptr_out;
+
+            // itero su tutti i vicini in uscita del nodo corrente
+            for (int_t e = 0; e < neighs->size; e++) {
+
+                // anche se un nodo è un vicino nel grafo originale, potrebbe non far parte del subgraph generato dalla BFS
+                // bisogna evitare di includere archi verso nodi che non esistono nel GFA che diamo a theseus
+                vid_t dest_id = (vid_t)(uintptr_t)neighs->data[e];
+                int is_in_subgraph = 0;
+                for (int_t i = 0; i < subgraph->nodes->size; i++) {
+                    // se il vicino è presente nel subgraph allora accendo il flag
+                    if ((vid_t)(uintptr_t)subgraph->nodes->data[i] == dest_id) {
+                        is_in_subgraph = 1; break;
+                    }
+                }
+
+                // solo se il vicino è presente nel subgraph
+                if (is_in_subgraph) {
+
+                    gin_vertex_t *v_dest = (gin_vertex_t *)graph->vertex_list->data[dest_id]; 
+                    
+                    // il .ging ha perso le informazioni sugli overlap. Oppure nel caso di ebola.gfa non ci sono informazioni su questi (solo 0M)
+                    // con calculate_overlap trovo gli overlap (confrontando la fine del nodo sorgente con l'inizio del nodo destinazione)
+                    // ovlp sarà pari al numero di basi alla fine di v_src uguali alle basi all'inizio di v_dest, se ovlp è 0 non ci sono basi uguali
+                    int_t ovlp = calculate_overlap(v_src->label->seq, v_src->label->size, 
+                                                   v_dest->label->seq, v_dest->label->size);
+
+                    if (len + 256 > capacity) { capacity += 4096; gfa = realloc(gfa, capacity); }
+                    
+                    // se l'overlap è maggiore di 0 (in un GFA sarebbe xM con x > 0) allora scrivo l'arco con l'overlap
+                    if (ovlp > 0) {
+                        len += sprintf(gfa + len, "L\t%lld\t+\t%lld\t+\t%lldM\n",
+                                       (long long)v_id, (long long)dest_id, (long long)ovlp);
+                    }
+                    
+                    // scrivo sempre l'arco con 0M (senza overlap).
+                    // in questo modo troveremo exact matches sia per percorsi che includono l'overlap che per percorsi che non lo includono
+                    len += sprintf(gfa + len, "L\t%lld\t+\t%lld\t+\t0M\n",
+                                   (long long)v_id, (long long)dest_id);
+                                   
+                    added_any_link = 1;
+                }
+            }
+        }
+    }
+
+    // se ci si trova nel caso in cui la BFS ha trovato solo il nodo del seme e nessun vicino, aggiunngo un arco finto
+    // che collega il nodo a se stesso con 0M
+    // questo perchè altrimenti theseus andrebbe andrebbe a restuituire un errore dicendo che il GFA non è valido siccome non contiene archi
+    if (!added_any_link && subgraph->nodes->size > 0) {
+        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[0];
+        if (len + 128 > capacity) { capacity += 4096; gfa = realloc(gfa, capacity); }
+        len += sprintf(gfa + len, "L\t%lld\t+\t%lld\t+\t0M\n",
+                       (long long)v_id, (long long)v_id);
+    }
+
+    return gfa;
+}
+
+extern gin_fstruct_t prm_fstruct; 
+
+// =====================================================================
+// verify
+// =====================================================================
 
 void gin_gin_verify_task(
     gin_gin_t *gin, gin_graph_t *graph, gin_gin_decoder_t *dec,
-    query_task_t *task, int_t max_matches, int_t max_errors
+    query_task_t *task, int_t max_matches, int_t max_errors,
+    FILE *log_file
 ) {
-    // hash table per ricordarci le origini (vid + offset) già esplorate per questa query
     gin_table_t *processed_origins = NULL;
     gin_table_init(&processed_origins, 128, &prm_fstruct, &prm_fstruct);
+
+    int best_score = 9999999; 
+    int best_offset = -1;
+    vid_t best_vid = 0;
+    char best_seed[1024] = "";
+    int found_any = 0;
 
     for (int_t r = 0; r < task->regions_found->size; r++) {
         query_region_t *reg = (query_region_t *)task->regions_found->data[r];
@@ -2082,59 +2256,156 @@ void gin_gin_verify_task(
 
             for (int_t m = 0; m < decoded_matches->size; m++) {
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
-                
+
+                // uso json_offset per identificare dove inizia la query rispetto al nodo 
                 int_t json_offset = dm->offset - reg->qo;
                 
-                // logica di deduplicazione
-                // si utilizza una chiave unica unendo VID (32 bit alti) e l'Offset (32 bit bassi)
+                // key, fondo vid e l'offset (entrambi 32 bit) in un unico numero a 64 bit
                 uint64_t origin_key = ((uint64_t)dm->vid << 32) | (uint32_t)json_offset;
                 void *dummy_check;
                 
-                // se questa origine è già stata calcolata da un'altra regione, si salta l'esplorazione
+                // se ho già provato ad allineare la stessa read partendo dallo stesso vid e offset, salto la verifica duplice
+                // utilizzo la key per verificare
                 if (gin_table_lookup(processed_origins, (void *)(uintptr_t)origin_key, &dummy_check)) {
                     continue; 
                 }
-                // altrimenti la si segna come processata
                 gin_table_insert(processed_origins, (void *)(uintptr_t)origin_key, (void *)1);
 
 
                 int_t seed_len = reg->subs->size;
+
+                // calcolo quante basi della read restano a destra / sinistra del seme 
                 int_t query_rem_right = task->str->size - (reg->qo + seed_len);
                 int_t query_rem_left = reg->qo;
                 
+                // definisco il raggio di esplorazione. Aggiungo max-errors per permettere il worst-case
+                // ovvero il caso in cui tutti gli errori siano concentrati su un unico lato della read e siano tutti inserzioni
                 int_t max_dist_right = query_rem_right + max_errors;
                 int_t max_dist_left  = query_rem_left + max_errors;
 
+                // inizializzazione strutture locali, subgraph è un vettore di vid_t in cui salvo i nodi che la BFS trova per poi generare il GFA
                 local_subgraph_t *subgraph = local_subgraph_init();
+
+                // tabella hash che la BFS usa per segnarsi i nodi già visitati ed evitare loop se il grafo ha dei cicli
                 gin_table_t *visited_nodes = NULL;
                 gin_table_init(&visited_nodes, 128, &prm_fstruct, &prm_fstruct); 
 
-                // dm->offset + seed_len come offset di partenza per la BFS a destra
+                // BFS verso destra (1 == direction). riempe il subgraph con i nodi raggiungibili entro max_dist_right basi a destra del seme
                 extract_subgraph_bfs(graph, dm->vid, dm->offset + seed_len, max_dist_right, 1, visited_nodes, subgraph);
 
-                // dm->offset come offset di partenza per la BFS a sinistra
+                // BFS verso sinistra (0 == direction). riempe il subgraph con i nodi raggiungibili entro max_dist_left basi a sinistra del seme
                 extract_subgraph_bfs(graph, dm->vid, dm->offset, max_dist_left, 0, visited_nodes, subgraph);
 
+                // il risultato è un subgraph che contiene tutti i nodi raggiungibili entro max_dist_right a destra e max_dist_left a sinistra del seme
 
-                // blocco per testare il grafo estratto
+                char *gfa_string = generate_gfa_from_subgraph(graph, subgraph);
 
-                int_t json_node_id = dm->vid + 101;
+                // il risultato è il GFA del subgraph in una stringa
 
-                printf("\n[DEBUG BFS] Read: %s\n", task->str->seq);
-                printf("[DEBUG BFS] region: %s\n", reg->subs->seq);
-                printf("[DEBUG BFS] Read Position -> \"node_id\": \"%lld\", \"offset\": \"%lld\"\n", 
-                       (long long)json_node_id, (long long)json_offset);
-                printf("[DEBUG BFS] Dettagli interni -> Seme VID: %lld, Seme Offset: %lld, Query Offset (qo): %lld\n", 
-                       (long long)dm->vid, (long long)dm->offset, (long long)reg->qo);
+                // ==========================================================
+                // FIX 3: Backtracking calcolando l'overlap!
+                // ==========================================================
+                
+                // num_starts tiene traccia di quanti punti di partenza validi ci sono per l'allineamento
+                // potrebbo averne più di uno se la read inizia prima del nodo del seme, potrebbe allora iniziare in più nodi predecessori del nodo del seme 
+                vid_t start_vid_array[16];
+                int start_offset_array[16];
+                int num_starts = 0;
 
-                printf("\n==========================================\n");
+                // caso in cui la read inizia dentro lo stesso nodo
+                // se json_offset è maggiore di zero, allora siamo rimasti all'interno del nodo attuale
+                if (json_offset >= 0) {
+                    // l'allineamento può iniziare nello stesso nodo del seme (dm->vid) all'offset appena clacolato
+                    // in questo caso abbiamo un solo punto di partenza certo (num_starts = 1) che è il nodo del seme (dm->vid) e l'offset calcolato
+                    start_vid_array[0] = dm->vid;
+                    start_offset_array[0] = json_offset;
+                    num_starts = 1;
+                } 
+                // caso in cui la read inizia prima del nodo del seme
+                // theseus non accetta un offset negativo, quindi se json_offset è negativo
+                // dobbiamo tornare sui predecessori del nodo del seme per trovare dei punti di partenza validi per l'allineamento
+                else {
+                    void *ptr_in = NULL;
+                    gin_vertex_t *v_curr = (gin_vertex_t *)graph->vertex_list->data[dm->vid];
 
+                    // controllo se il nodo del seme ha dei predecessori nel grafo originale
+                    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)dm->vid, &ptr_in)) {
+                        gin_vector_t *preds = (gin_vector_t *)ptr_in;
+                        // itero su tutti i predecessori del nodo del seme
+                        for(int_t p = 0; p < preds->size; p++) {
+                            vid_t pred_vid = (vid_t)(uintptr_t)preds->data[p];
+                            gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_vid];
+                            
+                            // calcolo l'overlap con il predecessore
+                            int_t ovlp = calculate_overlap(v_pred->label->seq, v_pred->label->size, 
+                                                           v_curr->label->seq, v_curr->label->size);
+                            
+                            // tolgo l'overlap per evitare di contare le stesse basi due volte
+                            // l'offset nel nodo precedente sarà pari a lunghezza del nodo precedente - overlap - offset mancante
+                            int pred_offset = (v_pred->label->size - ovlp) + json_offset;
+                            
+                            // se l'offset nel nodo precedente è positivo significa che abbiamo trovato il nodo in cui la read può partire
+                            // oss: per ora si va indietro solo di un nodo, ma se la read fosse molto lunga / la labelo del nodo molto corta
+                            // sarebbe necessario andare nei nodi ancora prima per portare l'offset a un valore positivo
+                            if (pred_offset >= 0 && num_starts < 16) {
+                                start_vid_array[num_starts] = pred_vid;
+                                start_offset_array[num_starts] = pred_offset;
+                                num_starts++;
+                            }
+                        }
+                    }
+                    
+                    // fallback: se num_starts è ancora 0 significa che la read inizia prima del nodo del seme ma il backtracking
+                    // non è riuscito a trovare nessun predecessore con un offset positivo
+                    // diamo a theseus il nodo del seme come iniziale, inserirà penalità pari a gap open + offset negativo per
+                    // allineare la parte iniziale della read, ma almeno avremo un risultato per la read
+                    if (num_starts == 0) {
+                        start_vid_array[0] = dm->vid;
+                        start_offset_array[0] = 0;
+                        num_starts = 1;
+                    }
+                }
+
+                // itero su tutti i possibili punti di partenza della read
+                for (int s = 0; s < num_starts; s++) {
+                    char start_node_name[64];
+                    // theseus non vuole solo l'ID del nodo ma anche l'orientamento -> aggiungo +
+                    // per testare la reverse complement bisognerebbe testare anche la versione con -
+                    sprintf(start_node_name, "%lld+", (long long)start_vid_array[s]);
+                    int start_offset = start_offset_array[s];
+
+                    // chiamata alla funzione del wrapper passando la stringa del GFA, la read, il nodo di partenza e l'offset di partenza
+                    theseus_result_t res = run_theseus_alignment(gfa_string, task->str->seq, start_node_name, start_offset);
+
+                    if (res.valid) {
+                        // se lo score restituito è il migliore, allora salvo lo score, l'offset, il nodo di partenza e il seme che sto testando
+                        if (res.score < best_score) {
+                            best_score = res.score;
+                            best_offset = res.start_offset;
+                            best_vid = start_vid_array[s]; 
+                            strncpy(best_seed, reg->subs->seq, sizeof(best_seed) - 1);
+                            found_any = 1;
+                        }
+                    }
+                    free_theseus_result(&res);
+                }
+
+                free(gfa_string);
                 local_subgraph_free(subgraph);
                 gin_table_free(visited_nodes);
             }
         }
     }
-    
-    // pulizia della hash table delle origini a fine task
+
+    if (found_any) {
+        fprintf(log_file, "[MIGLIORE] Read: %s\n", task->str->seq);
+        fprintf(log_file, "  Seme: %s | Nodo: %lld | Offset: %d | Penalty: %d\n", 
+                best_seed, (long long)best_vid + 1, best_offset, best_score);
+        fprintf(log_file, "--------------------------------------------------\n");
+    } else {
+        fprintf(log_file, "[FALLITO] Read: %s\n", task->str->seq);
+        fprintf(log_file, "--------------------------------------------------\n");
+    }
+
     gin_table_free(processed_origins);
 }
