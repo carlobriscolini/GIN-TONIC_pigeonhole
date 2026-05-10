@@ -1950,7 +1950,7 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 #include <string.h>
 
 // =====================================================================
-// HELPER: Calcola dinamicamente l'overlap esatto tra due nodi
+// STRUTTURE DATI
 // =====================================================================
 
 typedef struct query_task_ {
@@ -2087,142 +2087,66 @@ void extract_subgraph_bfs(
 }
 
 // =====================================================================
-// GFA
+// DATI
 // =====================================================================
 
-int_t calculate_overlap(const char *s1, size_t len1, const char *s2, size_t len2) {
+void build_theseus_data(
+    gin_graph_t *graph, local_subgraph_t *subgraph,
+    th_node_t **out_nodes, int *out_num_nodes,
+    th_edge_t **out_edges, int *out_num_edges
+) {
+    int num_nodes = subgraph->nodes->size;
+    th_node_t *nodes = malloc(num_nodes * sizeof(th_node_t));
     
-    // overlap tra due nodi non può essere più lungo del nodo più corto 
-    int_t max_ovlp = (len1 < len2) ? len1 : len2;
-
-    // supponendo che non troveremo overlap più lunghi di 150, metto un limite a 150 per evitare confronti troppo lunghi
-    if (max_ovlp > 150) max_ovlp = 150; 
-
-    for (int_t i = max_ovlp; i > 0; i--) {
-        // confronto gli ultimi i caratteri di s1 con i primi i caratteri di s2, se sono uguali ritorno i come lunghezza dell'overlap
-        if (memcmp(s1 + len1 - i, s2, i) == 0) {
-            return i;
-        }
-    }
-    return 0;
-}
-
-// traformiamo la lista di nodi ottenuta dalla BFS in un file GFA da dare a theseus
-char* generate_gfa_from_subgraph(gin_graph_t *graph, local_subgraph_t *subgraph) {
-    size_t capacity = 4096;
-    size_t len = 0;
-    char *gfa = malloc(capacity);
-
-    // imposto il primo carattere come terminatore per rendere la stringa valida anche se vuota
-    gfa[0] = '\0';
-
-    // se si passa a theseus un GFA con solo nodi, senza archi, darebbe problemi
-    // se alla fine del ciclo la flag è ancora 0, allora aggiungo un arco finto
-    int added_any_link = 0;
-
-    // ciclo su tutti i nodi del subgraph generato dalla BFS
-    for (int_t n = 0; n < subgraph->nodes->size; n++) {
-        
-        // recupero l'ID e la label del nodo del subgraph
-        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[n];
+    // estrazione nodi
+    for(int i = 0; i < num_nodes; i++) {
+        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[i];
         gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[v_id];
-        
-        // prima di scrivere il nodo nel GFA controllo se c'è abbastanza spazio nella stringa, altrimenti rialloco spazio pari al doppio di quello necessario
-        size_t needed = len + v->label->size + 128;
-        if (needed > capacity) {
-            capacity = needed * 2;
-            gfa = realloc(gfa, capacity);
-        }
-        
-        // inizio la riga del GFA con "S" seguito dall'ID del nodo
-        // uso sprintf per aggiornare len con il numero di caratteri scritti
-        len += sprintf(gfa + len, "S\t%lld\t", (long long)v_id);
-
-        // filtro copiando solo le lettere A, T, C, G scartandoq ualsiasi altro carattere di controllo, questo perche i GFA devono avere una riga per ogni elemento
-        for (size_t i = 0; i < v->label->size; i++) {
-            char c = v->label->seq[i];
-            if (c != '\0' && c != '\n' && c != '\r') {
-                gfa[len++] = c;
-            }
-        }
-
-        // termino la riga del GFA e aggiungo un terminatore per rendere la stringa gfa valida
-        gfa[len++] = '\n';
-        gfa[len] = '\0';
+        nodes[i].id = (long long)v_id;
+        nodes[i].seq = v->label->seq;
+        nodes[i].seq_length = v->label->size;
     }
 
-    // a questo punto la stringa gfa contiene le righe riguardanti nodi come    S   101    ACGTTA
+    // estrazione archi
+    int edge_capacity = 16;
+    int num_edges = 0;
+    th_edge_t *edges = malloc(edge_capacity * sizeof(th_edge_t));
 
-    // ora scriviamo gli archi
-    // itero su titti i nodi del subgraph
-    for (int_t n = 0; n < subgraph->nodes->size; n++) {
-
-        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[n];
-        gin_vertex_t *v_src = (gin_vertex_t *)graph->vertex_list->data[v_id]; 
-        
+    for(int i = 0; i < num_nodes; i++) {
+        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[i];
         void *ptr_out = NULL;
 
-        // controllo se il nodo ha vicini in uscita dal grafo originale
         if (gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)v_id, &ptr_out)) {
-
-            // neighs è il vettore dei vicini in uscita del nodo corrente
             gin_vector_t *neighs = (gin_vector_t *)ptr_out;
-
-            // itero su tutti i vicini in uscita del nodo corrente
-            for (int_t e = 0; e < neighs->size; e++) {
-
-                // anche se un nodo è un vicino nel grafo originale, potrebbe non far parte del subgraph generato dalla BFS
-                // bisogna evitare di includere archi verso nodi che non esistono nel GFA che diamo a theseus
+            for (int e = 0; e < neighs->size; e++) {
                 vid_t dest_id = (vid_t)(uintptr_t)neighs->data[e];
+                
+                // controllo se la destinazione è presente nel nostro subgraph locale
                 int is_in_subgraph = 0;
-                for (int_t i = 0; i < subgraph->nodes->size; i++) {
-                    // se il vicino è presente nel subgraph allora accendo il flag
-                    if ((vid_t)(uintptr_t)subgraph->nodes->data[i] == dest_id) {
-                        is_in_subgraph = 1; break;
+                for (int j = 0; j < num_nodes; j++) {
+                    if ((vid_t)(uintptr_t)subgraph->nodes->data[j] == dest_id) { 
+                        is_in_subgraph = 1; break; 
                     }
                 }
 
-                // solo se il vicino è presente nel subgraph
                 if (is_in_subgraph) {
-
-                    gin_vertex_t *v_dest = (gin_vertex_t *)graph->vertex_list->data[dest_id]; 
-                    
-                    // il .ging ha perso le informazioni sugli overlap. Oppure nel caso di ebola.gfa non ci sono informazioni su questi (solo 0M)
-                    // con calculate_overlap trovo gli overlap (confrontando la fine del nodo sorgente con l'inizio del nodo destinazione)
-                    // ovlp sarà pari al numero di basi alla fine di v_src uguali alle basi all'inizio di v_dest, se ovlp è 0 non ci sono basi uguali
-                    int_t ovlp = calculate_overlap(v_src->label->seq, v_src->label->size, 
-                                                   v_dest->label->seq, v_dest->label->size);
-
-                    if (len + 256 > capacity) { capacity += 4096; gfa = realloc(gfa, capacity); }
-                    
-                    // se l'overlap è maggiore di 0 (in un GFA sarebbe xM con x > 0) allora scrivo l'arco con l'overlap
-                    if (ovlp > 0) {
-                        len += sprintf(gfa + len, "L\t%lld\t+\t%lld\t+\t%lldM\n",
-                                       (long long)v_id, (long long)dest_id, (long long)ovlp);
+                    if (num_edges >= edge_capacity) {
+                        edge_capacity *= 2;
+                        edges = realloc(edges, edge_capacity * sizeof(th_edge_t));
                     }
-                    
-                    // scrivo sempre l'arco con 0M (senza overlap).
-                    // in questo modo troveremo exact matches sia per percorsi che includono l'overlap che per percorsi che non lo includono
-                    len += sprintf(gfa + len, "L\t%lld\t+\t%lld\t+\t0M\n",
-                                   (long long)v_id, (long long)dest_id);
-                                   
-                    added_any_link = 1;
+                    edges[num_edges].src = (long long)v_id;
+                    edges[num_edges].dst = (long long)dest_id;
+                    num_edges++;
                 }
             }
         }
     }
 
-    // se ci si trova nel caso in cui la BFS ha trovato solo il nodo del seme e nessun vicino, aggiunngo un arco finto
-    // che collega il nodo a se stesso con 0M
-    // questo perchè altrimenti theseus andrebbe andrebbe a restuituire un errore dicendo che il GFA non è valido siccome non contiene archi
-    if (!added_any_link && subgraph->nodes->size > 0) {
-        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[0];
-        if (len + 128 > capacity) { capacity += 4096; gfa = realloc(gfa, capacity); }
-        len += sprintf(gfa + len, "L\t%lld\t+\t%lld\t+\t0M\n",
-                       (long long)v_id, (long long)v_id);
-    }
 
-    return gfa;
+    *out_nodes = nodes;
+    *out_num_nodes = num_nodes;
+    *out_edges = edges;
+    *out_num_edges = num_edges;
 }
 
 extern gin_fstruct_t prm_fstruct; 
@@ -2298,12 +2222,13 @@ void gin_gin_verify_task(
 
                 // il risultato è un subgraph che contiene tutti i nodi raggiungibili entro max_dist_right a destra e max_dist_left a sinistra del seme
 
-                char *gfa_string = generate_gfa_from_subgraph(graph, subgraph);
-
-                // il risultato è il GFA del subgraph in una stringa
+                th_node_t *th_nodes = NULL;
+                th_edge_t *th_edges = NULL;
+                int num_th_nodes = 0, num_th_edges = 0;
+                build_theseus_data(graph, subgraph, &th_nodes, &num_th_nodes, &th_edges, &num_th_edges);
 
                 // ==========================================================
-                // FIX 3: Backtracking calcolando l'overlap!
+                // Backtracking 
                 // ==========================================================
                 
                 // num_starts tiene traccia di quanti punti di partenza validi ci sono per l'allineamento
@@ -2326,7 +2251,6 @@ void gin_gin_verify_task(
                 // dobbiamo tornare sui predecessori del nodo del seme per trovare dei punti di partenza validi per l'allineamento
                 else {
                     void *ptr_in = NULL;
-                    gin_vertex_t *v_curr = (gin_vertex_t *)graph->vertex_list->data[dm->vid];
 
                     // controllo se il nodo del seme ha dei predecessori nel grafo originale
                     if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)dm->vid, &ptr_in)) {
@@ -2336,16 +2260,11 @@ void gin_gin_verify_task(
                             vid_t pred_vid = (vid_t)(uintptr_t)preds->data[p];
                             gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_vid];
                             
-                            // calcolo l'overlap con il predecessore
-                            int_t ovlp = calculate_overlap(v_pred->label->seq, v_pred->label->size, 
-                                                           v_curr->label->seq, v_curr->label->size);
-                            
-                            // tolgo l'overlap per evitare di contare le stesse basi due volte
-                            // l'offset nel nodo precedente sarà pari a lunghezza del nodo precedente - overlap - offset mancante
-                            int pred_offset = (v_pred->label->size - ovlp) + json_offset;
+                            // l'offset nel nodo precedente sarà pari a: lunghezza del nodo precedente + json_offset (che è un numero negativo)
+                            int pred_offset = v_pred->label->size + json_offset;
                             
                             // se l'offset nel nodo precedente è positivo significa che abbiamo trovato il nodo in cui la read può partire
-                            // oss: per ora si va indietro solo di un nodo, ma se la read fosse molto lunga / la labelo del nodo molto corta
+                            // oss: per ora si va indietro solo di un nodo, ma se la read fosse molto lunga / la label del nodo molto corta
                             // sarebbe necessario andare nei nodi ancora prima per portare l'offset a un valore positivo
                             if (pred_offset >= 0 && num_starts < 16) {
                                 start_vid_array[num_starts] = pred_vid;
@@ -2368,17 +2287,18 @@ void gin_gin_verify_task(
 
                 // itero su tutti i possibili punti di partenza della read
                 for (int s = 0; s < num_starts; s++) {
-                    char start_node_name[64];
-                    // theseus non vuole solo l'ID del nodo ma anche l'orientamento -> aggiungo +
-                    // per testare la reverse complement bisognerebbe testare anche la versione con -
-                    sprintf(start_node_name, "%lld+", (long long)start_vid_array[s]);
+                    long long start_node_id = (long long)start_vid_array[s];
                     int start_offset = start_offset_array[s];
 
-                    // chiamata alla funzione del wrapper passando la stringa del GFA, la read, il nodo di partenza e l'offset di partenza
-                    theseus_result_t res = run_theseus_alignment(gfa_string, task->str->seq, start_node_name, start_offset);
+                    theseus_result_t res = run_theseus_alignment(
+                        th_nodes, num_th_nodes, 
+                        th_edges, num_th_edges, 
+                        task->str->seq, 
+                        start_node_id, 
+                        start_offset
+                    );
 
                     if (res.valid) {
-                        // se lo score restituito è il migliore, allora salvo lo score, l'offset, il nodo di partenza e il seme che sto testando
                         if (res.score < best_score) {
                             best_score = res.score;
                             best_offset = res.start_offset;
@@ -2390,7 +2310,9 @@ void gin_gin_verify_task(
                     free_theseus_result(&res);
                 }
 
-                free(gfa_string);
+                free(th_nodes);
+                free(th_edges);
+                
                 local_subgraph_free(subgraph);
                 gin_table_free(visited_nodes);
             }

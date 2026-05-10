@@ -1,24 +1,36 @@
 #ifndef GIN_THESEUS_WRAPPER_H
 #define GIN_THESEUS_WRAPPER_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// struct in C per ottenere i risultati da theseus
 typedef struct {
-    int score;             // penalità (oss: 0 se 0 errori)
-    char* cigar_string;    // CIGAR
-    int start_offset;      // offset calcolato
+    long long id;          
+    const char* seq;       
+    size_t seq_length;
+} th_node_t;
+
+typedef struct {
+    long long src;         
+    long long dst;         
+} th_edge_t;
+
+typedef struct {
+    int score;             
+    char* cigar_string;    
+    int start_offset;      
     int end_offset;
-    int valid;             // 1 se l'allineamento ha avuto successo, 0 altrimenti
+    int valid;             
 } theseus_result_t;
 
-// la funzione chiamata in gin_gin.c
 theseus_result_t run_theseus_alignment(
-    const char* gfa_string, 
+    th_node_t* nodes, int num_nodes,
+    th_edge_t* edges, int num_edges,
     const char* read_seq, 
-    const char* start_node_name, 
+    long long start_node_id, 
     int start_offset
 );
 

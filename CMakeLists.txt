@@ -7,6 +7,7 @@ set(PROJECT_DESCRIPTION "GIN-TONIC: Non-hierarchical full-text indexing for grap
 set(CMAKE_BUILD_TYPE "Release")
 
 set(CMAKE_C_STANDARD 99)
+set(CMAKE_CXX_STANDARD 20)
 
 set(BUILD_OPENMP             OFF)
 set(BUILD_MARCH_NATIVE_FLAG  OFF)
@@ -135,7 +136,14 @@ target_link_libraries(gin_lib_static PUBLIC divsufsort64-gin)
 target_link_libraries(gin_lib_static PUBLIC m)
 
 # theseus (libreria C++ per l'allineamento sui grafi)
-target_link_libraries(gin_lib_static PUBLIC theseus)
+target_link_libraries(gin_lib_static PUBLIC ${PROJECT_EXTERN_DIR}/theseus-lib/build/libtheseus.a)
+
+target_include_directories(
+    gin_lib_static PUBLIC ${PROJECT_HEADER_DIR}
+    gin_lib_static PUBLIC ${CMAKE_BINARY_DIR}/extern/libdivsufsort-gin/include
+    gin_lib_static PUBLIC ${PROJECT_EXTERN_DIR}/theseus-lib/include
+    gin_lib_static PUBLIC ${PROJECT_EXTERN_DIR}/theseus-lib
+)
 
 #sdsl
 if(BUILD_DNA_FMI)

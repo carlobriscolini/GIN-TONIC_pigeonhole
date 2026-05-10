@@ -1,72 +1,70 @@
 #include "theseus_wrapper.h"
-#include <sstream>
-#include <fstream>
 #include <string>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
+#include <unordered_map>
 
-#include "theseus/theseus_aligner.h"
 #include "theseus/penalties.h"
+#include "theseus/heuristics.h" 
 #include "theseus/alignment.h"
+#include "theseus/graph.h"
+#include "theseus/theseus_aligner_impl.h"
 
 extern "C" {
 
 theseus_result_t run_theseus_alignment(
-    const char* gfa_string, 
+    th_node_t* nodes, int num_nodes,
+    th_edge_t* edges, int num_edges,
     const char* read_seq, 
-    const char* start_node_name, 
+    long long start_node_id, 
     int start_offset
 ) {
-    // struttura che dovrà tornare al codice C per portare i risultati da C++ a C
     theseus_result_t res;
-
-    // inizializzazione della struttura in uno stato di default
-    res.valid = 0; 
-    res.score = 0; 
-    res.start_offset = 0; 
-    res.end_offset = 0; 
-    res.cigar_string = nullptr;
+    res.valid = 0; res.score = 0; res.start_offset = 0; res.end_offset = 0; res.cigar_string = nullptr;
 
     try {
+        theseus::Graph g;
+        std::unordered_map<long long, theseus::Graph::NodeId> gin_to_theseus;
+        gin_to_theseus.reserve(num_nodes); 
 
-        // approccio 1: scrivo su fiel
+        for (int i = 0; i < num_nodes; ++i) {
+            std::string clean_seq;
+            clean_seq.reserve(nodes[i].seq_length);
+            for(size_t j = 0; j < nodes[i].seq_length; ++j) {
+                char c = nodes[i].seq[j];
+                if (c != '\0' && c != '\n' && c != '\r') {
+                    clean_seq.push_back(c);
+                }
+            }
+            auto t_id = g.add_node(clean_seq);
+            gin_to_theseus[nodes[i].id] = t_id;
+        }
 
-        // scrivo il GFA su un file temporaneo
-        std::ofstream out_gfa("debug_graph.gfa");
-        out_gfa << gfa_string;
-        out_gfa.close();
+        for (int i = 0; i < num_edges; ++i) {
+            auto src_t = gin_to_theseus.at(edges[i].src);
+            auto dst_t = gin_to_theseus.at(edges[i].dst);
+            g.add_edge(src_t, dst_t);
+        }
 
-        // faccio leggere a theseus il file fisico
-        std::ifstream in_gfa("debug_graph.gfa");
-
-        // approccio 2: uso una stringstream per incapsulare la gfa_string direttamente in memoria
-        // std::istringstream in_gfa(gfa_string);
-
-        // APPROCCIO 2 È PIÙ LENTO, COME È POSSIBILE?
-
-        // configurazione delle penalità: 0 = match, 5 = mismatch, 5 = gap open, 1 = gap extend
         theseus::Penalties penalties(0, 5, 5, 1);
+        theseus::Heuristics heuristics(false, false);
         
-        // aligner carica il grafo dal file e prepara le matrici di calcolo
-        theseus::TheseusAligner aligner(penalties, in_gfa);
+        theseus::TheseusAlignerImpl aligner(penalties, heuristics, std::move(g), false);
         
-        std::string start_node(start_node_name);
         std::string read(read_seq);
+        theseus::Graph::NodeId t_start_node = gin_to_theseus.at(start_node_id);
         
-        theseus::Alignment aln = aligner.align(read, start_node, start_offset);
+        theseus::Alignment aln = aligner.align(read, t_start_node, start_offset);
         
-        // estrazione risultati
         res.score = aln.compute_affine_gap_score(penalties);
         res.start_offset = aln.start_offset;
         res.end_offset = aln.end_offset;
         res.valid = 1;
 
-        // catch di possibili errori trovati da theseus durante l'allineamento
     } catch (const std::exception& e) {
-        printf("[THESEUS ERROR C++] Eccezione catturata: %s\n", e.what());
+        fprintf(stderr, "[THESEUS ERROR C++] Eccezione: %s\n", e.what());
     } catch (...) {
-        printf("[THESEUS ERROR C++] Errore fatale sconosciuto in Theseus!\n");
+        fprintf(stderr, "[THESEUS ERROR C++] Errore fatale sconosciuto in Theseus!\n");
     }
 
     return res;
