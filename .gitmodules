@@ -4,6 +4,6 @@
 [submodule "extern/libdivsufsort-gin"]
 	path = extern/libdivsufsort-gin
 	url = https://github.com/uensalo/libdivsufsort-gin.git
-[submodule "theseus-lib"]
-	path = theseus-lib
-	url = https://github.com/albertjimenezbl/theseus-lib
+[submodule "extern/theseus-lib"]
+	path = extern/theseus-lib
+	url = https://github.com/albertjimenezbl/theseus-lib.git
