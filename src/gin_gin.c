@@ -1948,11 +1948,11 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 // =====================================================================
 // STRUTTURE DATI
 // =====================================================================
-
 typedef struct query_task_ {
     gin_string_t *str;
     gin_vector_t *regions_found;
@@ -1968,6 +1968,7 @@ typedef struct query_region {
     gin_gin_stats_t *stats;
 } query_region_t;
 
+// La nostra nuova leggerissima struct per la coda
 typedef struct {
     vid_t vid;
     int_t dist_from_seed;
@@ -1989,116 +1990,158 @@ void local_subgraph_free(local_subgraph_t *sub) {
 }
 
 // =====================================================================
-// BFS
+// CSR (Compressed Sparse Row) GRAPH
 // =====================================================================
-void extract_subgraph_bfs(
-    gin_graph_t *graph, 
-    vid_t seed_vid, 
-    int_t seed_offset,
-    int_t max_dist, 
-    int direction, 
-    gin_table_t *visited_nodes, 
-    local_subgraph_t *subgraph
-) {
-    // coda FIFO della BFS. 
-    gin_vector_t *queue;
-    gin_vector_init(&queue, 16, NULL);
+typedef struct {
+    uint32_t *fwd_offsets;
+    uint32_t *fwd_edges;
+    uint32_t *bwd_offsets;
+    uint32_t *bwd_edges;
+    uint32_t *node_lengths;
+    int_t num_nodes;
+} gin_csr_graph_t;
 
-    // creo bfs_node che serve a tenere traccia della distanza percorsa dal seed e lo metto in coda per essere esplorato
-    bfs_node_t *start = malloc(sizeof(bfs_node_t));
-    start->vid = seed_vid;
-    start->dist_from_seed = 0;
-    gin_vector_append(queue, start);
+gin_csr_graph_t* build_csr_from_graph(gin_graph_t *graph) {
+    if (!graph || !graph->vertex_list) return NULL;
 
-    // prima di aggiungere il nodo al subgraph, controlo se è già stato visitato (causa precedente chiamata o ciclicità del grafo)
-    // visited_nodes è l'hash table che tiene traccia dei nodi già visitati
-    void *dummy;
-    if (!gin_table_lookup(visited_nodes, (void *)(uintptr_t)seed_vid, &dummy)) {
+    gin_csr_graph_t *csr = malloc(sizeof(gin_csr_graph_t));
+    csr->num_nodes = graph->vertex_list->size;
+    csr->fwd_offsets = calloc(csr->num_nodes + 1, sizeof(uint32_t));
+    csr->bwd_offsets = calloc(csr->num_nodes + 1, sizeof(uint32_t));
+    csr->node_lengths = malloc(csr->num_nodes * sizeof(uint32_t));
 
-        // se il nodo è nuovo la aggiungo alla hash table dei visitati e al subgraph
-        gin_table_insert(visited_nodes, (void *)(uintptr_t)seed_vid, (void *)1);
-        gin_vector_append(subgraph->nodes, (void *)(uintptr_t)seed_vid);
+    int_t total_fwd_edges = 0;
+    int_t total_bwd_edges = 0;
+
+    for (int_t i = 0; i < csr->num_nodes; i++) {
+        gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[i];
+        csr->node_lengths[i] = v->label->size;
+
+        void *ptr = NULL;
+        if (graph->outgoing_neighbors && gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)i, &ptr)) {
+            if (ptr) total_fwd_edges += ((gin_vector_t *)ptr)->size;
+        }
+        if (graph->incoming_neighbors && gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)i, &ptr)) {
+            if (ptr) total_bwd_edges += ((gin_vector_t *)ptr)->size;
+        }
     }
 
-    // utilizzo head come indice dei nodi da esplorare nella coda
-    int_t head = 0; 
+    csr->fwd_edges = total_fwd_edges > 0 ? malloc(total_fwd_edges * sizeof(uint32_t)) : NULL;
+    csr->bwd_edges = total_bwd_edges > 0 ? malloc(total_bwd_edges * sizeof(uint32_t)) : NULL;
 
-    // fino a quando head non raggiunge la fine del vettore queue->size ci sono ancora nodi da esplorare
-    while (head < queue->size) {
-        // estraggo il nodo corrente in curr ed incremento head
-        bfs_node_t *curr = (bfs_node_t *)queue->data[head++];
+    uint32_t fwd_idx = 0;
+    uint32_t bwd_idx = 0;
 
-        // verifico che l'ID del nodo sia valido nel grafo
-        if (curr->vid >= graph->vertex_list->size) continue;
-        gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[curr->vid];
-
-        // se la distanza percorsa finora è già superiore al limite massimo, smetto di guardare i vicini di questo nodo
-        // il nodo corrente è nel subgraph ma non si deve andare oltre
-        if (curr->dist_from_seed >= max_dist) continue;
-
-        // calcolo le basi consumate
-        // caso verso destra (direction == 1): basi consumate pari a lunghezza totale della label del nodo - l'offset del seed nel nodo
-        // caso verso sinistra (direction == 0): basi consumate pari all'offset del seed del nodo
-        int_t consumed;
-        if (curr->vid == seed_vid) {
-            consumed = (direction == 1) ? (v->label->size - seed_offset) : seed_offset;
-        } else {
-            consumed = v->label->size;
+    for (int_t i = 0; i < csr->num_nodes; i++) {
+        csr->fwd_offsets[i] = fwd_idx;
+        csr->bwd_offsets[i] = bwd_idx;
+        void *ptr = NULL;
+        
+        if (graph->outgoing_neighbors && gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)i, &ptr)) {
+            gin_vector_t *vec = (gin_vector_t *)ptr;
+            if (vec) {
+                for (int_t e = 0; e < vec->size; e++) {
+                    csr->fwd_edges[fwd_idx++] = (uint32_t)(uintptr_t)vec->data[e];
+                }
+            }
         }
-
-        // aggiorno la distanza totale percorsa dal seme alla fine (se verso destra) / inizio (se verso sinistra) del nodo corrente
-        int_t next_dist = curr->dist_from_seed + consumed;
-
-        // rendo la BFS bidirezionale, se direction è 1 (verso destra) guardo i vicini in uscita
-        // se direction è 0 (verso sinistra) guardo i vicini che entrano
-        gin_table_t *neighbors_table = direction ? graph->outgoing_neighbors : graph->incoming_neighbors;
-        void *ptr_neighbors = NULL;
-
-        // if per controllare se il nodo corrente ha dei vicini nella direzione che ci interessa
-        if (gin_table_lookup(neighbors_table, (void *)(uintptr_t)curr->vid, &ptr_neighbors)) {
-            
-            // estraggo il vettore dei vicini
-            gin_vector_t *neighbors = (gin_vector_t *)ptr_neighbors;
-            
-            // itero su ogni vicino del nodo corrente
-            for (int_t n = 0; n < neighbors->size; n++) {
-                vid_t next_vid = (vid_t)(uintptr_t)neighbors->data[n];
-
-                // filtro per evitare lloop, se un nodo è già stato visitato lo ignoro.
-                if (!gin_table_lookup(visited_nodes, (void *)(uintptr_t)next_vid, &dummy)) {
-
-                    // se il nodo è nuovo lo aggiungo alla hash table dei nodi visitati e al subgraphs
-                    // garantisce che ogni nodo appaia una sola volta nel GFA che daremo a theseus
-                    gin_table_insert(visited_nodes, (void *)(uintptr_t)next_vid, (void *)1);
-                    gin_vector_append(subgraph->nodes, (void *)(uintptr_t)next_vid);
-                    
-                    // aggiungo il nodo vicino alla coda della BFS per essere esplorato a sua volta
-                    bfs_node_t *next_node = malloc(sizeof(bfs_node_t));
-                    next_node->vid = next_vid;
-                    next_node->dist_from_seed = next_dist;
-                    gin_vector_append(queue, next_node);
+        if (graph->incoming_neighbors && gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)i, &ptr)) {
+            gin_vector_t *vec = (gin_vector_t *)ptr;
+            if (vec) {
+                for (int_t e = 0; e < vec->size; e++) {
+                    csr->bwd_edges[bwd_idx++] = (uint32_t)(uintptr_t)vec->data[e];
                 }
             }
         }
     }
 
-    for (int_t i = 0; i < queue->size; i++) free(queue->data[i]);
-    gin_vector_free(queue);
+    csr->fwd_offsets[csr->num_nodes] = fwd_idx;
+    csr->bwd_offsets[csr->num_nodes] = bwd_idx;
+
+    return csr;
+}
+
+void free_csr_graph(gin_csr_graph_t *csr) {
+    if (!csr) return;
+    if (csr->fwd_offsets) free(csr->fwd_offsets);
+    if (csr->fwd_edges) free(csr->fwd_edges);
+    if (csr->bwd_offsets) free(csr->bwd_offsets);
+    if (csr->bwd_edges) free(csr->bwd_edges);
+    if (csr->node_lengths) free(csr->node_lengths);
+    free(csr);
 }
 
 // =====================================================================
-// DATI
+// BFS 
 // =====================================================================
-
-void build_theseus_data(
-    gin_graph_t *graph, local_subgraph_t *subgraph,
-    th_node_t **out_nodes, int *out_num_nodes,
-    th_edge_t **out_edges, int *out_num_edges
+void extract_subgraph_bfs(
+    gin_csr_graph_t *csr, vid_t seed_vid, 
+    int_t seed_offset, int_t max_dist, int direction, 
+    uint8_t *visited_array, local_subgraph_t *subgraph
 ) {
+    if (!csr || seed_vid >= csr->num_nodes) return;
+
+    // Coda statica ultra-veloce sullo Stack (Zero Allocazioni in RAM Heap!)
+    bfs_node_t queue[4096]; 
+    int head = 0;
+    int tail = 0;
+
+    queue[tail].vid = seed_vid;
+    queue[tail].dist_from_seed = 0;
+    tail++;
+
+    if (!visited_array[seed_vid]) {
+        visited_array[seed_vid] = 1;
+        gin_vector_append(subgraph->nodes, (void *)(uintptr_t)seed_vid);
+    }
+
+    while (head < tail) {
+        bfs_node_t curr = queue[head++];
+        if (curr.vid >= csr->num_nodes) continue;
+        if (curr.dist_from_seed >= max_dist) continue;
+
+        int_t node_len = csr->node_lengths[curr.vid];
+        int_t consumed = (curr.vid == seed_vid) ? 
+            ((direction == 1) ? (node_len - seed_offset) : seed_offset) : node_len;
+        
+        int_t next_dist = curr.dist_from_seed + consumed;
+
+        uint32_t start_idx = (direction == 1) ? csr->fwd_offsets[curr.vid] : csr->bwd_offsets[curr.vid];
+        uint32_t end_idx   = (direction == 1) ? csr->fwd_offsets[curr.vid + 1] : csr->bwd_offsets[curr.vid + 1];
+        uint32_t *edges    = (direction == 1) ? csr->fwd_edges : csr->bwd_edges;
+
+        if (edges) {
+            for (uint32_t i = start_idx; i < end_idx; i++) {
+                vid_t next_vid = (vid_t)edges[i];
+                
+                if (!visited_array[next_vid]) {
+                    visited_array[next_vid] = 1;
+                    gin_vector_append(subgraph->nodes, (void *)(uintptr_t)next_vid);
+                    
+                    // Sicurezza contro overflow della coda statica
+                    if (tail < 4096) {
+                        queue[tail].vid = next_vid;
+                        queue[tail].dist_from_seed = next_dist;
+                        tail++;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =====================================================================
+// DATI THESEUS
+// =====================================================================
+void build_theseus_data(
+    gin_graph_t *graph, gin_csr_graph_t *csr, local_subgraph_t *subgraph, uint8_t *visited_array,
+    th_node_t **out_nodes, int *out_num_nodes, th_edge_t **out_edges, int *out_num_edges
+) {
+    if (!csr) return;
+
     int num_nodes = subgraph->nodes->size;
     th_node_t *nodes = malloc(num_nodes * sizeof(th_node_t));
     
-    // estrazione nodi
     for(int i = 0; i < num_nodes; i++) {
         vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[i];
         gin_vertex_t *v = (gin_vertex_t *)graph->vertex_list->data[v_id];
@@ -2107,29 +2150,22 @@ void build_theseus_data(
         nodes[i].seq_length = v->label->size;
     }
 
-    // estrazione archi
     int edge_capacity = 16;
     int num_edges = 0;
     th_edge_t *edges = malloc(edge_capacity * sizeof(th_edge_t));
 
-    for(int i = 0; i < num_nodes; i++) {
-        vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[i];
-        void *ptr_out = NULL;
+    if (csr->fwd_edges) {
+        for(int i = 0; i < num_nodes; i++) {
+            vid_t v_id = (vid_t)(uintptr_t)subgraph->nodes->data[i];
+            if (v_id >= csr->num_nodes) continue;
 
-        if (gin_table_lookup(graph->outgoing_neighbors, (void *)(uintptr_t)v_id, &ptr_out)) {
-            gin_vector_t *neighs = (gin_vector_t *)ptr_out;
-            for (int e = 0; e < neighs->size; e++) {
-                vid_t dest_id = (vid_t)(uintptr_t)neighs->data[e];
+            uint32_t start = csr->fwd_offsets[v_id];
+            uint32_t end   = csr->fwd_offsets[v_id + 1];
+
+            for (uint32_t e = start; e < end; e++) {
+                vid_t dest_id = (vid_t)csr->fwd_edges[e];
                 
-                // controllo se la destinazione è presente nel nostro subgraph locale
-                int is_in_subgraph = 0;
-                for (int j = 0; j < num_nodes; j++) {
-                    if ((vid_t)(uintptr_t)subgraph->nodes->data[j] == dest_id) { 
-                        is_in_subgraph = 1; break; 
-                    }
-                }
-
-                if (is_in_subgraph) {
+                if (visited_array[dest_id]) {
                     if (num_edges >= edge_capacity) {
                         edge_capacity *= 2;
                         edges = realloc(edges, edge_capacity * sizeof(th_edge_t));
@@ -2142,7 +2178,6 @@ void build_theseus_data(
         }
     }
 
-
     *out_nodes = nodes;
     *out_num_nodes = num_nodes;
     *out_edges = edges;
@@ -2152,16 +2187,18 @@ void build_theseus_data(
 extern gin_fstruct_t prm_fstruct; 
 
 // =====================================================================
-// verify
+// VERIFY TASK
 // =====================================================================
-
 void gin_gin_verify_task(
-    gin_gin_t *gin, gin_graph_t *graph, gin_gin_decoder_t *dec,
-    query_task_t *task, int_t max_matches, int_t max_errors,
-    FILE *log_file
+    gin_gin_t *gin, gin_graph_t *graph, gin_csr_graph_t *csr, gin_gin_decoder_t *dec,
+    query_task_t *task, int_t max_matches, int_t max_errors, FILE *log_file
 ) {
+    if (!csr || !task || !task->regions_found || !dec) return;
+
     gin_table_t *processed_origins = NULL;
     gin_table_init(&processed_origins, 128, &prm_fstruct, &prm_fstruct);
+
+    uint8_t *global_visited = calloc(csr->num_nodes, sizeof(uint8_t));
 
     int best_score = 9999999; 
     int best_offset = -1;
@@ -2171,8 +2208,12 @@ void gin_gin_verify_task(
 
     for (int_t r = 0; r < task->regions_found->size; r++) {
         query_region_t *reg = (query_region_t *)task->regions_found->data[r];
+        if (!reg || !reg->exact_matches || !reg->subs) continue;
+
         for (int_t f = 0; f < reg->exact_matches->size; f++) {
             gin_fork_node_t *fork = (gin_fork_node_t *)reg->exact_matches->data[f];
+            if (!fork) continue;
+
             gin_vector_t *decoded_matches = NULL;
             gin_gin_decoder_decode_one(dec, fork->sa_lo, fork->sa_hi, max_matches, &decoded_matches);
             
@@ -2180,92 +2221,50 @@ void gin_gin_verify_task(
 
             for (int_t m = 0; m < decoded_matches->size; m++) {
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
+                if (!dm || dm->vid >= csr->num_nodes) continue;
 
-                // uso json_offset per identificare dove inizia la query rispetto al nodo 
                 int_t json_offset = dm->offset - reg->qo;
-                
-                // key, fondo vid e l'offset (entrambi 32 bit) in un unico numero a 64 bit
                 uint64_t origin_key = ((uint64_t)dm->vid << 32) | (uint32_t)json_offset;
                 void *dummy_check;
                 
-                // se ho già provato ad allineare la stessa read partendo dallo stesso vid e offset, salto la verifica duplice
-                // utilizzo la key per verificare
-                if (gin_table_lookup(processed_origins, (void *)(uintptr_t)origin_key, &dummy_check)) {
-                    continue; 
-                }
+                if (gin_table_lookup(processed_origins, (void *)(uintptr_t)origin_key, &dummy_check)) continue; 
                 gin_table_insert(processed_origins, (void *)(uintptr_t)origin_key, (void *)1);
 
-
                 int_t seed_len = reg->subs->size;
-
-                // calcolo quante basi della read restano a destra / sinistra del seme 
                 int_t query_rem_right = task->str->size - (reg->qo + seed_len);
                 int_t query_rem_left = reg->qo;
                 
-                // definisco il raggio di esplorazione. Aggiungo max-errors per permettere il worst-case
-                // ovvero il caso in cui tutti gli errori siano concentrati su un unico lato della read e siano tutti inserzioni
-                int_t max_dist_right = query_rem_right + max_errors;
-                int_t max_dist_left  = query_rem_left + max_errors;
-
-                // inizializzazione strutture locali, subgraph è un vettore di vid_t in cui salvo i nodi che la BFS trova per poi generare il GFA
                 local_subgraph_t *subgraph = local_subgraph_init();
 
-                // tabella hash che la BFS usa per segnarsi i nodi già visitati ed evitare loop se il grafo ha dei cicli
-                gin_table_t *visited_nodes = NULL;
-                gin_table_init(&visited_nodes, 128, &prm_fstruct, &prm_fstruct); 
-
-                // BFS verso destra (1 == direction). riempe il subgraph con i nodi raggiungibili entro max_dist_right basi a destra del seme
-                extract_subgraph_bfs(graph, dm->vid, dm->offset + seed_len, max_dist_right, 1, visited_nodes, subgraph);
-
-                // BFS verso sinistra (0 == direction). riempe il subgraph con i nodi raggiungibili entro max_dist_left basi a sinistra del seme
-                extract_subgraph_bfs(graph, dm->vid, dm->offset, max_dist_left, 0, visited_nodes, subgraph);
-
-                // il risultato è un subgraph che contiene tutti i nodi raggiungibili entro max_dist_right a destra e max_dist_left a sinistra del seme
+                extract_subgraph_bfs(csr, dm->vid, dm->offset + seed_len, query_rem_right + max_errors, 1, global_visited, subgraph);
+                extract_subgraph_bfs(csr, dm->vid, dm->offset, query_rem_left + max_errors, 0, global_visited, subgraph);
 
                 th_node_t *th_nodes = NULL;
                 th_edge_t *th_edges = NULL;
                 int num_th_nodes = 0, num_th_edges = 0;
-                build_theseus_data(graph, subgraph, &th_nodes, &num_th_nodes, &th_edges, &num_th_edges);
-
-                // ==========================================================
-                // Backtracking 
-                // ==========================================================
                 
-                // num_starts tiene traccia di quanti punti di partenza validi ci sono per l'allineamento
-                // potrebbo averne più di uno se la read inizia prima del nodo del seme, potrebbe allora iniziare in più nodi predecessori del nodo del seme 
+                build_theseus_data(graph, csr, subgraph, global_visited, &th_nodes, &num_th_nodes, &th_edges, &num_th_edges);
+
+                // Backtracking 
                 vid_t start_vid_array[16];
                 int start_offset_array[16];
                 int num_starts = 0;
 
-                // caso in cui la read inizia dentro lo stesso nodo
-                // se json_offset è maggiore di zero, allora siamo rimasti all'interno del nodo attuale
                 if (json_offset >= 0) {
-                    // l'allineamento può iniziare nello stesso nodo del seme (dm->vid) all'offset appena clacolato
-                    // in questo caso abbiamo un solo punto di partenza certo (num_starts = 1) che è il nodo del seme (dm->vid) e l'offset calcolato
                     start_vid_array[0] = dm->vid;
                     start_offset_array[0] = json_offset;
                     num_starts = 1;
-                } 
-                // caso in cui la read inizia prima del nodo del seme
-                // theseus non accetta un offset negativo, quindi se json_offset è negativo
-                // dobbiamo tornare sui predecessori del nodo del seme per trovare dei punti di partenza validi per l'allineamento
-                else {
-                    void *ptr_in = NULL;
+                } else {
+                    if (csr->bwd_edges) {
+                        uint32_t start = csr->bwd_offsets[dm->vid];
+                        uint32_t end   = csr->bwd_offsets[dm->vid + 1];
 
-                    // controllo se il nodo del seme ha dei predecessori nel grafo originale
-                    if (gin_table_lookup(graph->incoming_neighbors, (void *)(uintptr_t)dm->vid, &ptr_in)) {
-                        gin_vector_t *preds = (gin_vector_t *)ptr_in;
-                        // itero su tutti i predecessori del nodo del seme
-                        for(int_t p = 0; p < preds->size; p++) {
-                            vid_t pred_vid = (vid_t)(uintptr_t)preds->data[p];
-                            gin_vertex_t *v_pred = (gin_vertex_t *)graph->vertex_list->data[pred_vid];
+                        for (uint32_t p = start; p < end; p++) {
+                            vid_t pred_vid = (vid_t)csr->bwd_edges[p];
+                            if (pred_vid >= csr->num_nodes) continue;
                             
-                            // l'offset nel nodo precedente sarà pari a: lunghezza del nodo precedente + json_offset (che è un numero negativo)
-                            int pred_offset = v_pred->label->size + json_offset;
+                            int pred_offset = csr->node_lengths[pred_vid] + json_offset;
                             
-                            // se l'offset nel nodo precedente è positivo significa che abbiamo trovato il nodo in cui la read può partire
-                            // oss: per ora si va indietro solo di un nodo, ma se la read fosse molto lunga / la label del nodo molto corta
-                            // sarebbe necessario andare nei nodi ancora prima per portare l'offset a un valore positivo
                             if (pred_offset >= 0 && num_starts < 16) {
                                 start_vid_array[num_starts] = pred_vid;
                                 start_offset_array[num_starts] = pred_offset;
@@ -2273,11 +2272,6 @@ void gin_gin_verify_task(
                             }
                         }
                     }
-                    
-                    // fallback: se num_starts è ancora 0 significa che la read inizia prima del nodo del seme ma il backtracking
-                    // non è riuscito a trovare nessun predecessore con un offset positivo
-                    // diamo a theseus il nodo del seme come iniziale, inserirà penalità pari a gap open + offset negativo per
-                    // allineare la parte iniziale della read, ma almeno avremo un risultato per la read
                     if (num_starts == 0) {
                         start_vid_array[0] = dm->vid;
                         start_offset_array[0] = 0;
@@ -2285,27 +2279,19 @@ void gin_gin_verify_task(
                     }
                 }
 
-                // itero su tutti i possibili punti di partenza della read
+                // Allineamento
                 for (int s = 0; s < num_starts; s++) {
-                    long long start_node_id = (long long)start_vid_array[s];
-                    int start_offset = start_offset_array[s];
-
                     theseus_result_t res = run_theseus_alignment(
-                        th_nodes, num_th_nodes, 
-                        th_edges, num_th_edges, 
-                        task->str->seq, 
-                        start_node_id, 
-                        start_offset
+                        th_nodes, num_th_nodes, th_edges, num_th_edges, 
+                        task->str->seq, (long long)start_vid_array[s], start_offset_array[s]
                     );
 
-                    if (res.valid) {
-                        if (res.score < best_score) {
-                            best_score = res.score;
-                            best_offset = res.start_offset;
-                            best_vid = start_vid_array[s]; 
-                            strncpy(best_seed, reg->subs->seq, sizeof(best_seed) - 1);
-                            found_any = 1;
-                        }
+                    if (res.valid && res.score < best_score) {
+                        best_score = res.score;
+                        best_offset = res.start_offset;
+                        best_vid = start_vid_array[s]; 
+                        strncpy(best_seed, reg->subs->seq, sizeof(best_seed) - 1);
+                        found_any = 1;
                     }
                     free_theseus_result(&res);
                 }
@@ -2313,8 +2299,13 @@ void gin_gin_verify_task(
                 free(th_nodes);
                 free(th_edges);
                 
+                // PULIZIA O(K) MAGICA: Rimettiamo a 0 solo i nodi estratti! Niente più memset enormi.
+                for(int_t n = 0; n < subgraph->nodes->size; n++) {
+                    vid_t v = (vid_t)(uintptr_t)subgraph->nodes->data[n];
+                    global_visited[v] = 0;
+                }
+                
                 local_subgraph_free(subgraph);
-                gin_table_free(visited_nodes);
             }
         }
     }
@@ -2324,10 +2315,8 @@ void gin_gin_verify_task(
         fprintf(log_file, "  Seme: %s | Nodo: %lld | Offset: %d | Penalty: %d\n", 
                 best_seed, (long long)best_vid + 1, best_offset, best_score);
         fprintf(log_file, "--------------------------------------------------\n");
-    } else {
-        fprintf(log_file, "[FALLITO] Read: %s\n", task->str->seq);
-        fprintf(log_file, "--------------------------------------------------\n");
     }
 
+    free(global_visited); 
     gin_table_free(processed_origins);
 }

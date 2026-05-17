@@ -2125,6 +2125,31 @@ int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode) {
     return return_code;
 }
 
+
+#include <stdint.h>
+
+// =====================================================================
+// CSR GRAPH - Definizioni e Prototipi
+// =====================================================================
+typedef struct {
+    uint32_t *fwd_offsets;
+    uint32_t *fwd_edges;
+    uint32_t *bwd_offsets;
+    uint32_t *bwd_edges;
+    uint32_t *node_lengths;
+    int_t num_nodes;
+} gin_csr_graph_t;
+
+gin_csr_graph_t* build_csr_from_graph(gin_graph_t *graph);
+void free_csr_graph(gin_csr_graph_t *csr);
+void gin_gin_verify_task(
+    gin_gin_t *gin, gin_graph_t *graph, gin_csr_graph_t *csr, gin_gin_decoder_t *dec,
+    void *task, int_t max_matches, int_t max_errors, FILE *log_file
+);
+
+// =====================================================================
+// MAIN
+// =====================================================================
 int gin_main_pigeonhole(int argc, char **argv) {
 
     int return_code = 0;
@@ -2138,7 +2163,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
     FILE *finput = stdin;
     FILE *foutput = stdout;
     FILE *fref = NULL;
-    FILE *fgraph = NULL;
     FILE *fcache = NULL;
 
     int_t num_threads = 1;
@@ -2149,200 +2173,130 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t threshold = 1;
     bool decode = false;
 
-    struct timespec t1;
-    struct timespec t2;
-
-    // statistics for path enumeration
+    struct timespec t1, t2;
     int_t queries_processed = 0;
-
     double cache_build_time = .0;
     double total_execution_time = .0;
 
     static struct option options[] = {
             {"reference",  required_argument, NULL, 'r'},
-            {"graph",  required_argument, NULL, 'g'},
+            {"graph",      required_argument, NULL, 'g'},
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
-            {"cache"      ,required_argument, NULL, 'C'},
+            {"cache",      required_argument, NULL, 'C'},
             {"decode",     no_argument,       NULL, 'd'},
             {"batch-size", required_argument, NULL, 'b'},
             {"threads",    required_argument, NULL, 'j'},
             {"threshold",  required_argument, NULL, 't'},
     };
+    
     opterr = 0;
-    int optindex,c;
+    int optindex, c;
     while((c = getopt_long(argc, argv, "r:g:i:o:C:d:b:j:t:", options, &optindex)) != -1) {
         switch(c) {
-            case 'r': {
-                fref_path = optarg;
-                break;
-            }
-            case 'g': {
-                fgraph_path = optarg;
-                break;
-            }
-            case 'i': {
+            case 'r': fref_path = optarg; break;
+            case 'g': fgraph_path = optarg; break;
+            case 'i': 
                 finput_path = optarg;
                 finput = fopen(finput_path, "r");
                 if(!finput) {
-                    fprintf(stderr, "[gin:query] Input query path %s could not be opened, quitting.\n", finput_path);
-                    return_code = -1;
-                    return return_code;
+                    fprintf(stderr, "[gin:query] Impossibile aprire %s\n", finput_path);
+                    return -1;
                 }
                 break;
-            }
-            case 'o': {
-                foutput_path = optarg;
-                break;
-            }
-            case 'C': {
-                fcache_path = optarg;
-                break;
-            }
-            case 'd': {
-                decode = true;
-                break;
-            }
-            case 'b': {
-                batch_size = (int_t)strtoull(optarg, NULL, 10);
-                break;
-            }
-            case 'j': {
+            case 'o': foutput_path = optarg; break;
+            case 'C': fcache_path = optarg; break;
+            case 'd': decode = true; break;
+            case 'b': batch_size = (int_t)strtoull(optarg, NULL, 10); break;
+            case 'j': 
                 num_threads = (int_t)strtoull(optarg, NULL, 10);
                 #ifdef GIN_OMP
                 omp_set_num_threads((int)num_threads);
                 #endif
                 break;
-            }
-            case 't': {
-                threshold = (int_t)strtoull(optarg, NULL, 10);
-                break;
-            }
-            default: {
-                fprintf(stderr, "[gin:query] Option %s not recognized, please see gin help query for more.\n",optarg);
-                return_code = -1;
-                break;
-            }
+            case 't': threshold = (int_t)strtoull(optarg, NULL, 10); break;
+            default: return -1;
         }
     }
 
-    /**************************************************************************
-    * 1 - Read the graph index from disk, gin_buf and gin_buf_size should be
-    * populated and fref be closed by the end of this block
-    **************************************************************************/
+    // 1. Lettura Indice Reference
     fref = fopen(fref_path, "r");
-    if(!fref) {
-        fprintf(stderr, "[gin:query] Could not open index reference file %s, quitting.\n", fref_path);
-        return_code = -1;
-        return return_code;
-    }
+    if(!fref) return -1;
 
     uint64_t gin_buf_capacity = 65536;
     uint64_t gin_buf_size = 0;
     uint8_t *gin_buf = calloc(gin_buf_capacity, sizeof(uint8_t));
-
     uint64_t read_size;
     uint8_t *read_buf = calloc(GIN_MAIN_BUF_READ_SIZE, sizeof(uint8_t));
-    while((read_size = fread(read_buf,sizeof(uint8_t), GIN_MAIN_BUF_READ_SIZE, fref))) {
+    
+    while((read_size = fread(read_buf, sizeof(uint8_t), GIN_MAIN_BUF_READ_SIZE, fref))) {
         if(read_size + gin_buf_size > gin_buf_capacity) {
-            gin_buf = realloc(gin_buf, (gin_buf_capacity *= 2)*sizeof(uint8_t));
+            gin_buf = realloc(gin_buf, (gin_buf_capacity *= 2) * sizeof(uint8_t));
             memset(gin_buf + (gin_buf_capacity/2), 0, sizeof(uint8_t)*(gin_buf_capacity/2));
         }
-        memcpy(gin_buf+gin_buf_size,read_buf,read_size);
-        gin_buf_size+=read_size;
+        memcpy(gin_buf + gin_buf_size, read_buf, read_size);
+        gin_buf_size += read_size;
     }
-    gin_buf = realloc(gin_buf, gin_buf_size*sizeof(uint8_t));
+    gin_buf = realloc(gin_buf, gin_buf_size * sizeof(uint8_t));
     free(read_buf);
     fclose(fref);
 
-    /**************************************************************************
-    * parsing del .ging
-    * necessario, l'indice DNA-FMI non ha la funzione di decoding implementata
-    **************************************************************************/
+    // 2. Costruzione Grafo e CSR
     gin_graph_t *graph = NULL;
+    gin_csr_graph_t *csr = NULL;
 
-    // uso il nuovo parametro -g (il file .ging) per caricare il grafo
     if (fgraph_path) {
         FILE *f_ging = fopen(fgraph_path, "r");
-        if (!f_ging) {
-            fprintf(stderr, "Errore: impossibile aprire il file grafo %s\n", fgraph_path);
-            return -1;
+        if (f_ging) {
+            graph = ging_parse(f_ging); 
+            fclose(f_ging);
+            if (graph) {
+                csr = build_csr_from_graph(graph);
+            }
         }
-        
-        // legge il file riga per riga e costruisce l'oggetto graph
-        graph = ging_parse(f_ging); 
-        
-        fclose(f_ging);
     }
-    
 
-    /**************************************************************************
-    * 2 - Parse the bitstream into data structures, by the end of this block
-    * gin, gin_dec, gin_cache should be populated and gin_buf should be freed
-    **************************************************************************/
+    // 3. Deserializzazione Bitstream
     gin_gin_t *gin;
     gin_gin_cache_t *gin_cache = NULL;
     gin_gin_decoder_t *gin_dec;
     gin_gin_serialize_from_buffer(&gin, gin_buf, gin_buf_size);
 
-    if(!gin) {
-        fprintf(stderr, "[gin:query] Error encountered while parsing reference index. Quitting.\n");
-        return_code = -1;
-        return return_code;
-    }
-    if(decode) {
-                gin_gin_decoder_init(&gin_dec, gin);
-    }
+    if(!gin) return -1;
+    if(decode) gin_gin_decoder_init(&gin_dec, gin);
+
     if(fcache_path) {
         fcache = fopen(fcache_path, "r");
-        if(!fcache) {
-            fprintf(stderr, "[gin:query] Error encountered while parsing cache. Quitting.\n");
-            return_code = -1;
-            return return_code;
-        }
-        uint64_t gin_cache_buf_capacity = 65536;
-        uint64_t gin_cache_buf_size = 0;
-        uint8_t *gin_cache_buf = calloc(gin_cache_buf_capacity, sizeof(uint8_t));
-
-        uint64_t cache_read_size;
-        uint8_t *cache_read_buf = calloc(GIN_MAIN_BUF_READ_SIZE, sizeof(uint8_t));
-        clock_gettime(CLOCK_REALTIME, &t1);
-        while((cache_read_size = fread(cache_read_buf,sizeof(uint8_t), GIN_MAIN_BUF_READ_SIZE, fcache))) {
-            if(cache_read_size + gin_cache_buf_size > gin_cache_buf_capacity) {
-                gin_cache_buf = realloc(gin_cache_buf, (gin_cache_buf_capacity *= 2)*sizeof(uint8_t));
-                memset(gin_cache_buf + (gin_cache_buf_capacity/2), 0, sizeof(uint8_t)*(gin_cache_buf_capacity/2));
+        if(fcache) {
+            uint64_t gin_cache_buf_capacity = 65536;
+            uint64_t gin_cache_buf_size = 0;
+            uint8_t *gin_cache_buf = calloc(gin_cache_buf_capacity, sizeof(uint8_t));
+            
+            uint64_t cache_read_size; 
+            uint8_t *cache_read_buf = calloc(GIN_MAIN_BUF_READ_SIZE, sizeof(uint8_t));
+            
+            clock_gettime(CLOCK_REALTIME, &t1);
+            while((cache_read_size = fread(cache_read_buf, sizeof(uint8_t), GIN_MAIN_BUF_READ_SIZE, fcache))) {
+                if(cache_read_size + gin_cache_buf_size > gin_cache_buf_capacity) {
+                    gin_cache_buf = realloc(gin_cache_buf, (gin_cache_buf_capacity *= 2) * sizeof(uint8_t));
+                    memset(gin_cache_buf + (gin_cache_buf_capacity/2), 0, sizeof(uint8_t)*(gin_cache_buf_capacity/2));
+                }
+                memcpy(gin_cache_buf + gin_cache_buf_size, cache_read_buf, cache_read_size);
+                gin_cache_buf_size += cache_read_size;
             }
-            memcpy(gin_cache_buf+gin_cache_buf_size,cache_read_buf,cache_read_size);
-            gin_cache_buf_size+=cache_read_size;
+            gin_cache_buf = realloc(gin_cache_buf, gin_cache_buf_size * sizeof(uint8_t));
+            free(cache_read_buf);
+            fclose(fcache);
+            
+            gin_gin_cache_serialize_from_buffer(&gin_cache, gin_cache_buf, gin_cache_buf_size);
+            clock_gettime(CLOCK_REALTIME, &t2);
+            cache_build_time += to_sec(t1, t2);
+            cache_depth = gin_cache->depth;
         }
-        gin_cache_buf = realloc(gin_cache_buf, gin_cache_buf_size*sizeof(uint8_t));
-        free(cache_read_buf);
-        fclose(fcache);
-        gin_gin_cache_serialize_from_buffer(&gin_cache, gin_cache_buf, gin_cache_buf_size);
-        clock_gettime(CLOCK_REALTIME, &t2);
-        cache_build_time += to_sec(t1,t2);
-        cache_depth = gin_cache->depth;
     }
 
-    /**************************************************************************
-    * 3 - Parse queries from the input stream and query
-    **************************************************************************/
-    if(finput_path) {
-        finput = fopen(finput_path, "r");
-        if(!finput) {
-            fprintf(stderr,"[gin:query] Can't open input file %s, quitting.\n", finput_path);
-            return_code = -1;
-            return return_code;
-        }
-    }
-    if(foutput_path) {
-        foutput = fopen(foutput_path, "w");
-        if(!foutput) {
-            fprintf(stderr, "[gin:query] Can't open output file %s, quitting.\n", foutput_path);
-            return_code = -1;
-            return return_code;
-        }
-    }
+    // 4. Esecuzione Query
+    if(foutput_path) foutput = fopen(foutput_path, "w");
     
     int_t i;
     char *buf = calloc(GIN_MAIN_QUERY_BUF_LEN, sizeof(char));
@@ -2364,57 +2318,39 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
 
-
-
-    //    gin_gin_decode(gin, &graph, &permutation);
-
-
-
-
     FILE *main_log_file = fopen("alignment_log.txt", "w");
-    if (!main_log_file) {
-        fprintf(stderr, "Impossibile aprire alignment_log.txt\n");
-        return;
-    }
+    if (!main_log_file) return return_code;
 
     bool exit_flag = false;
-    
     clock_gettime(CLOCK_REALTIME, &t1);
+    
     while(true) {
         i = 0;
-
         while (i < batch_size && fgets(buf, GIN_MAIN_QUERY_BUF_LEN, finput)) {
             int_t len = (int_t)strlen(buf);
             if(buf[len-1] == '\n') buf[len-1] = 0;
-            if(!strcmp(buf,GIN_MAIN_QUERY_EXIT_PROMPT)) {
+            if(!strcmp(buf, GIN_MAIN_QUERY_EXIT_PROMPT)) {
                 exit_flag = true;
                 break;
             }
             gin_string_init_cstr(&tasks[i].str, buf);
-
             gin_vector_init(&tasks[i].regions_found, GIN_VECTOR_INIT_SIZE, NULL);
-
             gin_vector_init(&tasks[i].final_matches, GIN_VECTOR_INIT_SIZE, &gin_fstruct_decoded_match);
 
             queries_processed++;
             i++;
         }
 
-        // #pragma omp parallel for default(none) shared(tasks, i, gin, gin_cache, max_forks, threshold)
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
-
             int_t local_end = tasks[j].str->size;
 
             for(int_t local_start = tasks[j].str->size - 1; local_start > -1; local_start--) {
-
                 gin_string_t *current_subs;
-                gin_vector_t *current_exact;
-                gin_vector_t *current_partial;
+                gin_vector_t *current_exact, *current_partial;
                 gin_gin_stats_t *current_stats;
 
                 gin_string_substring(tasks[j].str, local_start, local_end, &current_subs);
-                
                 gin_gin_query_find(gin, gin_cache, current_subs, max_forks, &current_exact, &current_partial, &current_stats);
 
                 int_t matching_count = 0;
@@ -2424,7 +2360,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 }
 
                 if(matching_count <= threshold){
-
                     query_region_t *reg = calloc(1, sizeof(query_region_t));
                     reg->qo = local_start;
                     reg->subs = current_subs;
@@ -2434,11 +2369,8 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     reg->stats = current_stats;
 
                     gin_vector_append(tasks[j].regions_found, reg);
-
                     local_end = local_start;
-
                 } else {    
-
                     gin_vector_free(current_exact);
                     gin_vector_free(current_partial);
                     gin_string_free(current_subs);
@@ -2446,21 +2378,19 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 }
             }
 
-            if(fgraph_path) {
-                gin_gin_verify_task(gin, graph, gin_dec, &tasks[j], max_matches, 20, main_log_file);
+            if(fgraph_path && csr) {
+                gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 20, main_log_file);
             }
         }
-        if(exit_flag)
-            break;
+        if(exit_flag) break;
     }
+    
     clock_gettime(CLOCK_REALTIME, &t2);
-    total_execution_time = to_sec(t1,t2);
+    total_execution_time = to_sec(t1, t2);
     free(buf);
     free(tasks);
 
-    /**************************************************************************
-    * 4 - Free all data structures and return
-    **************************************************************************/
+    // 5. Cleanup e Chiusura
     fprintf(main_log_file, "\n==================================================\n");
     fprintf(main_log_file, "STATISTICHE FINALI\n");
     fprintf(main_log_file, "==================================================\n");
@@ -2468,18 +2398,15 @@ int gin_main_pigeonhole(int argc, char **argv) {
     fprintf(main_log_file, "Total cache build time: %lf seconds\n", cache_build_time);
     fprintf(main_log_file, "Cache depth: %lld\n", (long long)cache_depth);
     fprintf(main_log_file, "Queries processed: %lld\n", (long long)queries_processed);
-
     fclose(main_log_file);
 
-    if(fcache_path) {
-        gin_gin_cache_free(gin_cache);
-    }
+    if (csr) free_csr_graph(csr);
+    if(fcache_path) gin_gin_cache_free(gin_cache);
     if(finput_path) fclose(finput);
     if(foutput_path) fclose(foutput);
     gin_gin_free(gin);
 
     return return_code;
-
 }
 
 int gin_main_help(gin_mode_t progmode, char *progname) {
