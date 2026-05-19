@@ -2207,19 +2207,22 @@ void gin_gin_verify_task(
     int found_any = 0;
 
     for (int_t r = 0; r < task->regions_found->size; r++) {
+        if (best_score == 0) break;
         query_region_t *reg = (query_region_t *)task->regions_found->data[r];
         if (!reg || !reg->exact_matches || !reg->subs) continue;
 
         for (int_t f = 0; f < reg->exact_matches->size; f++) {
+            if (best_score == 0) break;
             gin_fork_node_t *fork = (gin_fork_node_t *)reg->exact_matches->data[f];
             if (!fork) continue;
 
             gin_vector_t *decoded_matches = NULL;
             gin_gin_decoder_decode_one(dec, fork->sa_lo, fork->sa_hi, max_matches, &decoded_matches);
-            
+
             if (!decoded_matches) continue;
 
             for (int_t m = 0; m < decoded_matches->size; m++) {
+                if (best_score == 0) break;
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
                 if (!dm || dm->vid >= csr->num_nodes) continue;
 
@@ -2307,6 +2310,8 @@ void gin_gin_verify_task(
                 
                 local_subgraph_free(subgraph);
             }
+
+            gin_vector_free(decoded_matches);
         }
     }
 

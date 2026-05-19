@@ -2379,7 +2379,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
 
             if(fgraph_path && csr) {
-                gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 20, main_log_file);
+                gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 5, main_log_file);
             }
         }
         if(exit_flag) break;
