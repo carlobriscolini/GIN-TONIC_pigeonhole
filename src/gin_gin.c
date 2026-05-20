@@ -2355,10 +2355,13 @@ void gin_gin_verify_task(
     }
 
     if (found_any) {
-        fprintf(log_file, "[MIGLIORE] Read: %s\n", task->str->seq);
-        fprintf(log_file, "  Seme: %s | Nodo: %lld | Offset: %d | Penalty: %d\n", 
-                best_seed, (long long)best_vid + 1, best_offset, best_score);
-        fprintf(log_file, "--------------------------------------------------\n");
+        #pragma omp critical(align_log)
+        {
+            fprintf(log_file, "[MIGLIORE] Read: %s\n", task->str->seq);
+            fprintf(log_file, "  Seme: %s | Nodo: %lld | Offset: %d | Penalty: %d\n",
+                    best_seed, (long long)best_vid + 1, best_offset, best_score);
+            fprintf(log_file, "--------------------------------------------------\n");
+        }
     }
 
     free(global_visited); 

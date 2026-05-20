@@ -2219,6 +2219,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
         }
     }
 
+#ifdef GIN_OMP
+    omp_set_num_threads((int)num_threads);
+#endif
+
     // 1. Lettura Indice Reference
     fref = fopen(fref_path, "r");
     if(!fref) return -1;
@@ -2341,6 +2345,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
             i++;
         }
 
+#ifdef GIN_OMP
+#pragma omp parallel for schedule(dynamic) default(none) \
+    shared(i, tasks, gin, gin_cache, max_forks, threshold, fgraph_path, csr, graph, gin_dec, max_matches, main_log_file)
+#endif
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
             int_t local_end = tasks[j].str->size;
