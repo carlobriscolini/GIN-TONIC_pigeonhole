@@ -2282,17 +2282,56 @@ void gin_gin_verify_task(
                     }
                 }
 
-                // Allineamento
-                for (int s = 0; s < num_starts; s++) {
+                // re-alignment
+                #define WIN_MAX_STARTS 128
+                vid_t win_vids[WIN_MAX_STARTS];
+                int   win_offs[WIN_MAX_STARTS];
+                int   win_num = 0;
+
+                int win_radius = (int)max_errors;
+                int win_total  = 2 * win_radius + 1;
+                for (int b = 0; b < num_starts && win_num < WIN_MAX_STARTS; b++) {
+                    vid_t base_vid = start_vid_array[b];
+                    int   base_off = start_offset_array[b];
+                    int_t base_len = csr->node_lengths[base_vid];
+                    for (int kk = 0; kk < win_total && win_num < WIN_MAX_STARTS; kk++) {
+                        int k = ((kk + 1) / 2) * ((kk & 1) ? -1 : 1);
+                        int new_off = base_off + k;
+                        if (new_off >= 0) {
+                            if (new_off < (int)base_len) {
+                                win_vids[win_num] = base_vid;
+                                win_offs[win_num] = new_off;
+                                win_num++;
+                            }
+                        } else if (csr->bwd_edges) {
+                            uint32_t pst = csr->bwd_offsets[base_vid];
+                            uint32_t pen = csr->bwd_offsets[base_vid + 1];
+                            for (uint32_t pi = pst; pi < pen && win_num < WIN_MAX_STARTS; pi++) {
+                                vid_t pv = (vid_t)csr->bwd_edges[pi];
+                                if (pv >= csr->num_nodes) continue;
+                                int po = (int)csr->node_lengths[pv] + new_off;
+                                if (po >= 0 && po < (int)csr->node_lengths[pv]) {
+                                    win_vids[win_num] = pv;
+                                    win_offs[win_num] = po;
+                                    win_num++;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // allineamento sulle posizioni espanse dalla window
+                for (int s = 0; s < win_num; s++) {
+                    if (best_score == 0) break;
                     theseus_result_t res = run_theseus_alignment(
-                        th_nodes, num_th_nodes, th_edges, num_th_edges, 
-                        task->str->seq, (long long)start_vid_array[s], start_offset_array[s]
+                        th_nodes, num_th_nodes, th_edges, num_th_edges,
+                        task->str->seq, (long long)win_vids[s], win_offs[s]
                     );
 
                     if (res.valid && res.score < best_score) {
                         best_score = res.score;
                         best_offset = res.start_offset;
-                        best_vid = start_vid_array[s]; 
+                        best_vid = win_vids[s];
                         strncpy(best_seed, reg->subs->seq, sizeof(best_seed) - 1);
                         found_any = 1;
                     }
