@@ -2171,7 +2171,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t max_forks = -1;
     int_t max_matches = -1;
     int_t threshold = 1;
-    bool decode = false;
 
     struct timespec t1, t2;
     int_t queries_processed = 0;
@@ -2184,7 +2183,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
             {"input",      required_argument, NULL, 'i'},          
             {"output",     required_argument, NULL, 'o'},
             {"cache",      required_argument, NULL, 'C'},
-            {"decode",     no_argument,       NULL, 'd'},
             {"batch-size", required_argument, NULL, 'b'},
             {"threads",    required_argument, NULL, 'j'},
             {"threshold",  required_argument, NULL, 't'},
@@ -2192,7 +2190,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     
     opterr = 0;
     int optindex, c;
-    while((c = getopt_long(argc, argv, "r:g:i:o:C:d:b:j:t:", options, &optindex)) != -1) {
+    while((c = getopt_long(argc, argv, "r:g:i:o:C:b:j:t:", options, &optindex)) != -1) {
         switch(c) {
             case 'r': fref_path = optarg; break;
             case 'g': fgraph_path = optarg; break;
@@ -2206,7 +2204,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 break;
             case 'o': foutput_path = optarg; break;
             case 'C': fcache_path = optarg; break;
-            case 'd': decode = true; break;
             case 'b': batch_size = (int_t)strtoull(optarg, NULL, 10); break;
             case 'j': 
                 num_threads = (int_t)strtoull(optarg, NULL, 10);
@@ -2217,6 +2214,11 @@ int gin_main_pigeonhole(int argc, char **argv) {
             case 't': threshold = (int_t)strtoull(optarg, NULL, 10); break;
             default: return -1;
         }
+    }
+
+    if(!fgraph_path) {
+        fprintf(stderr, "[gin:pigeonhole] Graph file is required for verification.\n");
+        return -1;
     }
 
     #ifdef GIN_OMP
@@ -2249,25 +2251,30 @@ int gin_main_pigeonhole(int argc, char **argv) {
     gin_graph_t *graph = NULL;
     gin_csr_graph_t *csr = NULL;
 
-    if (fgraph_path) {
-        FILE *f_ging = fopen(fgraph_path, "r");
-        if (f_ging) {
-            graph = ging_parse(f_ging); 
-            fclose(f_ging);
-            if (graph) {
-                csr = build_csr_from_graph(graph);
-            }
-        }
+    FILE *f_ging = fopen(fgraph_path, "r");
+    if (!f_ging) {
+        fprintf(stderr, "[gin:pigeonhole] Could not open graph file %s\n", fgraph_path);
+        return -1;
+    }
+    graph = ging_parse(f_ging);
+    fclose(f_ging);
+    if (graph) {
+        csr = build_csr_from_graph(graph);
+    }
+    if (!csr) {
+        fprintf(stderr, "[gin:pigeonhole] Could not build graph CSR for verification.\n");
+        return -1;
     }
 
     // 3. Deserializzazione Bitstream
     gin_gin_t *gin;
     gin_gin_cache_t *gin_cache = NULL;
-    gin_gin_decoder_t *gin_dec;
+    gin_gin_decoder_t *gin_dec = NULL;
     gin_gin_serialize_from_buffer(&gin, gin_buf, gin_buf_size);
 
     if(!gin) return -1;
-    if(decode) gin_gin_decoder_init(&gin_dec, gin);
+    gin_gin_decoder_init(&gin_dec, gin);
+    if(!gin_dec) return -1;
 
     if(fcache_path) {
         fcache = fopen(fcache_path, "r");
@@ -2331,7 +2338,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
 
         #ifdef GIN_OMP
         #pragma omp parallel for schedule(dynamic) default(none) \
-            shared(i, tasks, gin, gin_cache, max_forks, threshold, fgraph_path, csr, graph, gin_dec, max_matches, main_log_file)
+            shared(i, tasks, gin, gin_cache, max_forks, threshold, csr, graph, gin_dec, max_matches, main_log_file)
         #endif
         
         for (int_t j = 0; j < i; j++) {
@@ -2370,9 +2377,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
                 }
             }
 
-            if(fgraph_path && csr) {
-                gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 5, main_log_file);
-            }
+            gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 5, main_log_file);
         }
         for (int_t j = 0; j < i; j++) {
             gin_pigeonhole_task_clear(&tasks[j]);
@@ -2396,6 +2401,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     fclose(main_log_file);
 
     if (csr) free_csr_graph(csr);
+    gin_gin_decoder_free(gin_dec);
     if(fcache_path) gin_gin_cache_free(gin_cache);
     if(finput_path) fclose(finput);
     if(foutput_path) fclose(foutput);
