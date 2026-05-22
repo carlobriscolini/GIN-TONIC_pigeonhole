@@ -2176,6 +2176,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t queries_processed = 0;
     double cache_build_time = .0;
     double total_execution_time = .0;
+    gin_pigeonhole_stats_t timing_stats = {0};
 
     static struct option options[] = {
             {"reference",  required_argument, NULL, 'r'},
@@ -2226,6 +2227,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     #endif
 
     // 1. Lettura Indice Reference
+    clock_gettime(CLOCK_REALTIME, &t1);
     fref = fopen(fref_path, "r");
     if(!fref) return -1;
 
@@ -2246,6 +2248,8 @@ int gin_main_pigeonhole(int argc, char **argv) {
     gin_buf = realloc(gin_buf, gin_buf_size * sizeof(uint8_t));
     free(read_buf);
     fclose(fref);
+    clock_gettime(CLOCK_REALTIME, &t2);
+    timing_stats.setup_time += to_sec(t1, t2);
 
     // 2. Costruzione Grafo e CSR
     gin_graph_t *graph = NULL;
@@ -2256,10 +2260,16 @@ int gin_main_pigeonhole(int argc, char **argv) {
         fprintf(stderr, "[gin:pigeonhole] Could not open graph file %s\n", fgraph_path);
         return -1;
     }
+    clock_gettime(CLOCK_REALTIME, &t1);
     graph = ging_parse(f_ging);
     fclose(f_ging);
+    clock_gettime(CLOCK_REALTIME, &t2);
+    timing_stats.setup_time += to_sec(t1, t2);
     if (graph) {
+        clock_gettime(CLOCK_REALTIME, &t1);
         csr = build_csr_from_graph(graph);
+        clock_gettime(CLOCK_REALTIME, &t2);
+        timing_stats.setup_time += to_sec(t1, t2);
     }
     if (!csr) {
         fprintf(stderr, "[gin:pigeonhole] Could not build graph CSR for verification.\n");
@@ -2270,10 +2280,16 @@ int gin_main_pigeonhole(int argc, char **argv) {
     gin_gin_t *gin;
     gin_gin_cache_t *gin_cache = NULL;
     gin_gin_decoder_t *gin_dec = NULL;
+    clock_gettime(CLOCK_REALTIME, &t1);
     gin_gin_serialize_from_buffer(&gin, gin_buf, gin_buf_size);
+    clock_gettime(CLOCK_REALTIME, &t2);
+    timing_stats.setup_time += to_sec(t1, t2);
 
     if(!gin) return -1;
+    clock_gettime(CLOCK_REALTIME, &t1);
     gin_gin_decoder_init(&gin_dec, gin);
+    clock_gettime(CLOCK_REALTIME, &t2);
+    timing_stats.setup_time += to_sec(t1, t2);
     if(!gin_dec) return -1;
 
     if(fcache_path) {
@@ -2302,6 +2318,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
             gin_gin_cache_serialize_from_buffer(&gin_cache, gin_cache_buf, gin_cache_buf_size);
             clock_gettime(CLOCK_REALTIME, &t2);
             cache_build_time += to_sec(t1, t2);
+            timing_stats.setup_time += to_sec(t1, t2);
             cache_depth = gin_cache->depth;
         }
     }
@@ -2318,10 +2335,12 @@ int gin_main_pigeonhole(int argc, char **argv) {
     if (!main_log_file) return return_code;
 
     bool exit_flag = false;
-    clock_gettime(CLOCK_REALTIME, &t1);
+    struct timespec total_t1, total_t2;
+    clock_gettime(CLOCK_REALTIME, &total_t1);
     
     while(true) {
         i = 0;
+        clock_gettime(CLOCK_REALTIME, &t1);
         while (i < batch_size && fgets(buf, GIN_MAIN_QUERY_BUF_LEN, finput)) {
             int_t len = (int_t)strlen(buf);
             if(buf[len-1] == '\n') buf[len-1] = 0;
@@ -2335,10 +2354,13 @@ int gin_main_pigeonhole(int argc, char **argv) {
             queries_processed++;
             i++;
         }
+        clock_gettime(CLOCK_REALTIME, &t2);
+        timing_stats.query_read_time += to_sec(t1, t2);
 
+        clock_gettime(CLOCK_REALTIME, &t1);
         #ifdef GIN_OMP
         #pragma omp parallel for schedule(dynamic) default(none) \
-            shared(i, tasks, gin, gin_cache, max_forks, threshold, csr, graph, gin_dec, max_matches, main_log_file)
+            shared(i, tasks, gin, gin_cache, max_forks, threshold)
         #endif
         
         for (int_t j = 0; j < i; j++) {
@@ -2376,17 +2398,30 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     free(current_stats);
                 }
             }
+        }
+        clock_gettime(CLOCK_REALTIME, &t2);
+        timing_stats.seeding_time += to_sec(t1, t2);
 
+        clock_gettime(CLOCK_REALTIME, &t1);
+        #ifdef GIN_OMP
+        #pragma omp parallel for schedule(dynamic) default(none) \
+            shared(i, tasks, gin, csr, graph, gin_dec, max_matches, main_log_file)
+        #endif
+        for (int_t j = 0; j < i; j++) {
+            if (!tasks[j].str) continue;
             gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 5, main_log_file);
         }
+        clock_gettime(CLOCK_REALTIME, &t2);
+        timing_stats.verification_time += to_sec(t1, t2);
         for (int_t j = 0; j < i; j++) {
             gin_pigeonhole_task_clear(&tasks[j]);
         }
         if(exit_flag) break;
     }
     
-    clock_gettime(CLOCK_REALTIME, &t2);
-    total_execution_time = to_sec(t1, t2);
+    clock_gettime(CLOCK_REALTIME, &total_t2);
+    total_execution_time = to_sec(total_t1, total_t2);
+    timing_stats.total_execution_time = total_execution_time;
     free(buf);
     free(tasks);
 
@@ -2394,10 +2429,20 @@ int gin_main_pigeonhole(int argc, char **argv) {
     fprintf(main_log_file, "\n==================================================\n");
     fprintf(main_log_file, "STATISTICHE FINALI\n");
     fprintf(main_log_file, "==================================================\n");
+    clock_gettime(CLOCK_REALTIME, &t1);
     fprintf(main_log_file, "Total queries finding time: %lf seconds\n", total_execution_time);
     fprintf(main_log_file, "Total cache build time: %lf seconds\n", cache_build_time);
     fprintf(main_log_file, "Cache depth: %lld\n", (long long)cache_depth);
     fprintf(main_log_file, "Queries processed: %lld\n", (long long)queries_processed);
+    fprintf(main_log_file, "\nTIMING BREAKDOWN\n");
+    fprintf(main_log_file, "Setup/loading time: %lf seconds\n", timing_stats.setup_time);
+    fprintf(main_log_file, "Query read time: %lf seconds\n", timing_stats.query_read_time);
+    fprintf(main_log_file, "Seeding time: %lf seconds\n", timing_stats.seeding_time);
+    fprintf(main_log_file, "Verification/alignment time: %lf seconds\n", timing_stats.verification_time);
+    fprintf(main_log_file, "Total execution time: %lf seconds\n", timing_stats.total_execution_time);
+    clock_gettime(CLOCK_REALTIME, &t2);
+    timing_stats.output_time += to_sec(t1, t2);
+    fprintf(main_log_file, "Output/logging time: %lf seconds\n", timing_stats.output_time);
     fclose(main_log_file);
 
     if (csr) free_csr_graph(csr);

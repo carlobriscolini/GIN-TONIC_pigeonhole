@@ -25,6 +25,15 @@ typedef struct query_task_ {
     gin_vector_t *regions_found;
 } query_task_t;
 
+typedef struct {
+    double setup_time;
+    double query_read_time;
+    double seeding_time;
+    double verification_time;
+    double output_time;
+    double total_execution_time;
+} gin_pigeonhole_stats_t;
+
 gin_csr_graph_t *build_csr_from_graph(gin_graph_t *graph);
 void free_csr_graph(gin_csr_graph_t *csr);
 void gin_gin_verify_task(
