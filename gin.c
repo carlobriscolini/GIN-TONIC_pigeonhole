@@ -2128,6 +2128,10 @@ int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode) {
 }
 
 
+/******************************************************************************
+ * Pigeonhole query helpers
+ *****************************************************************************/
+
 static void gin_pigeonhole_region_free(query_region_t *region) {
     if (!region) return;
     gin_string_free(region->subs);
@@ -2147,6 +2151,7 @@ static void gin_pigeonhole_task_clear(query_task_t *task) {
     memset(task, 0, sizeof(*task));
 }
 
+/* Count the total suffix-array hits represented by a vector of fork intervals. */
 static int_t gin_pigeonhole_count_fork_matches(gin_vector_t *forks) {
     int_t matching_count = 0;
     if (!forks) return matching_count;
@@ -2157,6 +2162,7 @@ static int_t gin_pigeonhole_count_fork_matches(gin_vector_t *forks) {
     return matching_count;
 }
 
+/* Store a selected exact seed and transfer ownership of its fork intervals. */
 static void gin_pigeonhole_save_region(
     query_task_t *task,
     int_t local_start,
@@ -2170,6 +2176,7 @@ static void gin_pigeonhole_save_region(
     gin_vector_append(task->regions_found, reg);
 }
 
+/* Extend all current seed forks one character to the left using GIN search. */
 static void gin_pigeonhole_advance_seed(
     gin_gin_t *gin,
     gin_string_t *query,
@@ -2188,6 +2195,13 @@ static void gin_pigeonhole_advance_seed(
     gin_vector_free(partial_matches);
 }
 
+/**
+ * Partition a query into exact seeds with bounded occurrence counts.
+ *
+ * The scan proceeds from right to left. Each region is extended until the
+ * number of exact GIN hits is at most threshold, which provides the
+ * pigeonhole seeds later verified by full string-to-graph alignment.
+ */
 static void gin_pigeonhole_seed_incremental(
     gin_gin_t *gin,
     gin_gin_cache_t *gin_cache,
@@ -2320,7 +2334,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
         omp_set_num_threads((int)num_threads);
     #endif
 
-    // 1. Lettura Indice Reference
+    /* Load the serialized GIN reference index. */
     clock_gettime(CLOCK_REALTIME, &t1);
     fref = fopen(fref_path, "r");
     if(!fref) return -1;
@@ -2345,7 +2359,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     clock_gettime(CLOCK_REALTIME, &t2);
     timing_stats.setup_time += to_sec(t1, t2);
 
-    // 2. Costruzione Grafo e CSR
+    /* Parse the graph and build the CSR view used by verification. */
     gin_graph_t *graph = NULL;
     gin_csr_graph_t *csr = NULL;
 
@@ -2370,7 +2384,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
         return -1;
     }
 
-    // 3. Deserializzazione Bitstream
+    /* Deserialize the index and initialize the decoder for seed hits. */
     gin_gin_t *gin;
     gin_gin_cache_t *gin_cache = NULL;
     gin_gin_decoder_t *gin_dec = NULL;
@@ -2417,7 +2431,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
         }
     }
 
-    // 4. Esecuzione Query
+    /* Process queries in batches: first exact seeding, then verification. */
     if(foutput_path) foutput = fopen(foutput_path, "w");
     
     int_t i;
@@ -2487,7 +2501,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
     free(buf);
     free(tasks);
 
-    // 5. Cleanup e Chiusura
+    /* Final statistics and resource cleanup. */
     fprintf(main_log_file, "\n==================================================\n");
     fprintf(main_log_file, "STATISTICHE FINALI\n");
     fprintf(main_log_file, "==================================================\n");

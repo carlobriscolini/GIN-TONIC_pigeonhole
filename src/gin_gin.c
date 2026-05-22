@@ -549,44 +549,37 @@ void gin_gin_query_find_step(gin_gin_t *gin, gin_string_t *string, int_t max_for
         gin_fork_node_t *fork = forks->data[i];
         int_t c_0_lo, c_0_hi;
         gin_gin_fork_precedence_range(gin, fork, gin->c_0, &c_0_lo, &c_0_hi);
-        bool more_to_track = max_forks == -1 || max_forks > forks->size;    // il programma continua a guardare nuove biforcazioni se non c'è limite al numero di fork oppure se il numero di fork attuale è inferiore al limite
-        
-        // descrizione semplice del codice che segue: quando la ricerca sbatte contro l'inizio di un nodo, viene cosultata una "mappa stradale" IMT per vedere quali nodi genitori portano a quello attuale e crea un nuovo fork di ricerca per ognuna di queste
-        
-        if(more_to_track && c_0_lo < c_0_hi) {  // agisce solo se non siamo al massimo di biforcazioni e almeno uno dei caratteri negli indici del SA dell'intervallo attuale è il primo di una string label
+        bool more_to_track = max_forks == -1 || max_forks > forks->size;
+        if(more_to_track && c_0_lo < c_0_hi) {
             gin_vector_t *incoming_sa_intervals;
             #ifdef GIN_ORACLE
             gin_oimt_query(gin->oracle_r2r, c_0_lo - 1, c_0_hi - 2, string->seq[fork->pos], max_forks, &incoming_sa_intervals);
             #else
-            gin_imt_query(gin->r2r_tree, c_0_lo - 1, c_0_hi - 2, max_forks, &incoming_sa_intervals);    // "dato questo intervallo SA che rappresenta l'inizio del nodo corrente, quali sono gli intervalli SA che rappresentano la fine dei nodi che entrano in questo?"
-            #endif                                                                                      // il risultato, incoming_sa_intervals, è una lista di intervalli del Suffix Array che corrispondono alle posizioni finali di tutti i nodi genitori
+            gin_imt_query(gin->r2r_tree, c_0_lo - 1, c_0_hi - 2, max_forks, &incoming_sa_intervals);
+            #endif
             int_t no_forks_to_add = max_forks == -1 ? incoming_sa_intervals->size : MIN2(max_forks - forks->size, incoming_sa_intervals->size);
-            for (int_t j = 0; j < no_forks_to_add; j++) {       // per ogni predecessore trovato viene creato un nuovo fork
+            for (int_t j = 0; j < no_forks_to_add; j++) {
                 gin_imt_interval_t *interval = incoming_sa_intervals->data[j];
-                gin_fork_node_t *new_fork = gin_fork_node_init(V+1+interval->lo, V+2+interval->hi,  // intervallo SA, è un intervallo di ), ovvero di caratteri c_1 di fine stringa di tutti i nodi predecessori di quello che si ha completato
-                                                               fork->pos,   // posizione nella query non viene decrementata, non abbiamo matchato un nuovo carattere ma siamo solo passati da un nodo ad un altro
-                                                               MAIN);       // MAIN indica che questo è un percorso di ricerca primario che deve continuare ad essere espanso
-                //#pragma omp critical(forks_append)                
-                //{                                             
-                gin_vector_append(new_forks, new_fork);         // il fork originale che ha generato il salto muore "passando il testimone" ai suo fork genitori appena creati
+                gin_fork_node_t *new_fork = gin_fork_node_init(V+1+interval->lo, V+2+interval->hi,
+                                                               fork->pos,
+                                                               MAIN);
+                //#pragma omp critical(forks_append)
+                //{
+                gin_vector_append(new_forks, new_fork);
                 //}
             }
-            gin_vector_free(incoming_sa_intervals);             // in questa fase viene creato un fork per ogni nodo genitore. Quindi si avranno tanti fork quanti sono i nodi genitore 
-        }                                                       // (e quindi il SA dei nuovi fork sarà un itnervallo contenente un singolo indice che contiene il carattere di fine stringa del nodo genitore).
+            gin_vector_free(incoming_sa_intervals);
+        }
     }
     /**********************************************************************
     * Step 2 - Merge phase: merge overlapping ranges on the vertices
     **********************************************************************/
-    // fase in cui vengono compattati gli intervalli SA dei fork genitori appena creati in intervalli contigui dove possibile, in modo da ridurre il numero di fork da avanzare
-    // avere i SA compatti permette la chiamata di advance fork una o comunque meno volte, invece di una volta per ogni fork
     gin_vector_t *merged;
     gin_gin_compact_forks(gin, new_forks, &merged);
     gin_vector_free(new_forks);
     /**********************************************************************
     * Step 3 - Advance Phase: advance each fork once
     **********************************************************************/
-    // ora l'algoritmo deve effettivamente provare a "consumare" un carattere della query su tutti i percorsi attivi (su gli intervalli del SA dei fork)
-    // prima fase: ciclo for che si concentra sui fork pre-esistenti, quelli che erano già nel vettore forks prima dei salti
     gin_vector_t *next_iter_forks;
     gin_vector_init(&next_iter_forks, forks->size + merged->size, &gin_fstruct_fork_node);
     // advance and filter previous queries
@@ -610,7 +603,6 @@ void gin_gin_query_find_step(gin_gin_t *gin, gin_string_t *string, int_t max_for
             //}
         }
     }
-    // seconda fase: ciclo che si concentra sui nuovi fork creati dai salti (quindi fork che contengono intervalli di indici del SA che contengono il carattere di fine stringa c_1)
     // advance and filter next forks
     //#pragma omp parallel for default(none) shared(merged,V,gin,string,partial_matches,next_iter_forks, t)
     for (int_t i = 0; i < merged->size; i++) {
@@ -652,16 +644,16 @@ void gin_gin_query_find_step(gin_gin_t *gin, gin_string_t *string, int_t max_for
 }
 
 void gin_gin_query_find_bootstrapped(gin_gin_t *gin, gin_vector_t *bootstrap, int_t bootstrap_depth, gin_string_t *string, int_t max_forks, gin_vector_t **paths, gin_vector_t **dead_ends, gin_gin_stats_t *stats) {
-    gin_vector_t *forks = bootstrap;        // bootstrap forks (forks che contengono intervalli calcolati con la cache se utilizzata, altrimenti intervallo che contiene indici del SA che contengono il primo carattere cercato, ovvero l'ultimo della query)
+    gin_vector_t *forks = bootstrap;
     gin_vector_t *partial_matches;
     gin_vector_init(&partial_matches, GIN_VECTOR_INIT_SIZE, &gin_fstruct_fork_node);
 
-    int_t t = bootstrap_depth; // t è il contatore della posizione nella query, viene inizializzato a bootstrap depth che è la posizione dell'ultimo carattere cercato nella query (query size -1 se non si sta usando la cache)
-    while(forks->size && t > 0) {       // continua ad iterare fino a quando esiste ancora un intervallo SA valido e non abbiamo finito di processare tutti i caratteri della query (t > 0)
+    int_t t = bootstrap_depth; // stores the position last matched
+    while(forks->size && t > 0) {
 #ifdef GIN_DNA_FMI_DR
         gin_gin_query_find_step_double_rank(gin, string, max_forks, &t, &forks, &partial_matches, stats);
 #else
-        gin_gin_query_find_step(gin, string, max_forks, &t, &forks, &partial_matches, stats);   // ad ogni iterazione viene chiamata query find step
+        gin_gin_query_find_step(gin, string, max_forks, &t, &forks, &partial_matches, stats);
 #endif
     }
     /* experimental */
@@ -671,8 +663,8 @@ void gin_gin_query_find_bootstrapped(gin_gin_t *gin, gin_vector_t *bootstrap, in
     //gin_vector_free(forks);
     //forks = compacted;
     /* experimental */
-    *paths = forks;     // qui ci sono i "sopravvissuti", ovvero gli intervalli SA che contengono match esatti. Il vettore forks contiene tutti i percorsi che sono riusciti a matchare la query fino a quel punto. Quando il while termina (t == 0), forks conterrà solo i fork che contengono intervalli del SA per cui si ha exact matching
-    *dead_ends = partial_matches;   // qui finiscono i rami interrotti, utili per la mappabilità o allineamento con errori (e.g. sono riuscito a mappare 15 basi su 20 prima di fallire)
+    *paths = forks;
+    *dead_ends = partial_matches;
     stats->no_matching_forks = forks->size;
     stats->no_partial_forks = partial_matches->size;
 }
@@ -692,16 +684,16 @@ void gin_gin_query_find(gin_gin_t *gin,
         //data structures to keep track of forks
         gin_vector_init(&forks, GIN_VECTOR_INIT_SIZE, &gin_fstruct_fork_node);
 
-        // create the initial fork                                              // oss: indici adiacenti del SA contengono suffissi che iniziano e procedono con lettere stesse (ordinato alfabeticamente)
-        int_t init_lo = 0;//1 + V * (2+gin_ceil_log2(V));                       // intervallo iniziale di match -> non è ancora stato fatto
-        int_t init_hi = gin->no_chars;                                          // nessun check -> si prendono tutti gli indici del suffix array
-        gin_fork_node_t *root = gin_fork_node_init(init_lo, init_hi,            // un fork è uno stato attuale della ricerca -> intervallo SA, carattere che stiamo guardando
-                                                   string->size - 1,            // qua viene creato il primo fork, tutto il suffix array è candidato e stiamo guardando l'ultimo carattere
+        // create the initial fork
+        int_t init_lo = 0;//1 + V * (2+gin_ceil_log2(V));
+        int_t init_hi = gin->no_chars;
+        gin_fork_node_t *root = gin_fork_node_init(init_lo, init_hi,
+                                                   string->size - 1,
                                                    ROOT);
         // now advance the root once before starting to fork
-        gin_gin_advance_fork(gin, root, string);                                // prima ricerca (LF mapping probabilmente), cerca nell'indice quante volte e dove appare il carattere del fork nel suo intervallo
-                                                                                // se cerchiamo GATA, ora l'intervallo del SA sarà limitato agli indici che contengono suffissi che iniziano con A (ultimo carattere di GATA) (backward search)
-        if (root->sa_hi <= root->sa_lo) {                                       // gestione fallimento immediato, accade se il carattere non esiste proprio nel genoma. la root viene marcata come DEAD e la ricerca interrotta
+        gin_gin_advance_fork(gin, root, string);
+
+        if (root->sa_hi <= root->sa_lo) {
             gin_vector_t *matches;
             gin_vector_init(&matches, GIN_VECTOR_INIT_SIZE, &gin_fstruct_fork_node);
             *paths = matches;
@@ -714,9 +706,9 @@ void gin_gin_query_find(gin_gin_t *gin,
             ++(*stats)->no_calls_to_advance_fork;
             return;
         }
-        gin_vector_append(forks, root);                                         // se il carattere esiste, il root che sarà ora un intervallo ristretto
-        bootstrap_depth = string->size-1;                                       // viene aggiunto al vettore dei forks. forks è la lista di percorsi attivi
-    } else {                                                                    // che l'algoritmo continua ad espandere con il carattere che si sta guardando
+        gin_vector_append(forks, root);
+        bootstrap_depth = string->size-1;
+    } else {
         // cache lookup to get a bootstrap
         gin_vector_t *bootstrap;
         int_t cached_suffix_start = string->size <= cache->depth ? 0 : string->size - cache->depth;
@@ -1491,7 +1483,7 @@ void gin_gin_cache_free(gin_gin_cache_t *cache) {
     free(cache);
 }
 
-bool gin_gin_advance_fork(gin_gin_t *gin, gin_fork_node_t *fork, gin_string_t *pattern) {       // implementazione pratica LF mapping
+bool gin_gin_advance_fork(gin_gin_t *gin, gin_fork_node_t *fork, gin_string_t *pattern) {
 #ifdef GIN_DNA_FMI
     gin_dfmi_t *dfmi = gin->dfmi;
     char c = pattern->seq[fork->pos];
@@ -1512,16 +1504,16 @@ bool gin_gin_advance_fork(gin_gin_t *gin, gin_fork_node_t *fork, gin_string_t *p
     fork->sa_hi = (int_t)(base + rank_hi);
     --fork->pos;
     return fork->sa_hi > fork->sa_lo;
-#else                                   //oss: la BWT vede i caratteri come se fossero in una riga. Se usassimo solo questa funzione perderemmo i match trovati attraverso salti
+#else
     gin_fmi_t *fmi = gin->graph_fmi;
-    word_t encoding = fmi->c2e[pattern->seq[fork->pos]];                                    // converte il carattere in un numero (es. A->0, C->1, G->2, T->3)
-    count_t rank_lo_m_1 = fork->sa_lo ? gin_fmi_rank(fmi,encoding, fork->sa_lo-1) : 0ull;   // calcolo del rank. Calcola quante volte il carattere appare
-    count_t rank_hi_m_1 = fork->sa_hi ? gin_fmi_rank(fmi,encoding, fork->sa_hi-1) : 0ull;   // nella BWT fino alla posizione precedente. rank calcolato sia per sa_lo che per sa_hi, sa_hi - sa_lo dice quante volte la query cercata fino ad ora compare nel genoma
-    uint64_t base = fmi->char_counts[encoding];    //  arrary char_counts = C, dato un carattere trova la posizione in cui inizia il bucket del carattere cercato                                 
-    fork->sa_lo = (int_t)(base + rank_lo_m_1);      // LF mapping vero e proprio -> prende l'intervallo di indici del suffix array che contengono
-    fork->sa_hi = (int_t)(base + rank_hi_m_1);      // suffissi che contengono il carattere cercato partendo dall'intervallo che coneneva i suffissi che matchavano tutti i caratteri cercati fino ad ora
-    --fork->pos;                                    // sposta l'indice della query verso sinistra (aggiorna il carattere guardato per la prossima iterazione)
-    return fork->sa_hi > fork->sa_lo;               // restituisce true se l'intervallo è ancora valido (cioè se esiste almeno un match per la query cercata fino ad ora)
+    word_t encoding = fmi->c2e[pattern->seq[fork->pos]];
+    count_t rank_lo_m_1 = fork->sa_lo ? gin_fmi_rank(fmi,encoding, fork->sa_lo-1) : 0ull;
+    count_t rank_hi_m_1 = fork->sa_hi ? gin_fmi_rank(fmi,encoding, fork->sa_hi-1) : 0ull;
+    uint64_t base = fmi->char_counts[encoding];
+    fork->sa_lo = (int_t)(base + rank_lo_m_1);
+    fork->sa_hi = (int_t)(base + rank_hi_m_1);
+    --fork->pos;
+    return fork->sa_hi > fork->sa_lo;
 #endif
 }
 
@@ -1542,15 +1534,15 @@ bool gin_gin_fork_precedence_range(gin_gin_t *gin, gin_fork_node_t *fork, char_t
     *lo = (int_t)(base + rank_lo);
     *hi = (int_t)(base + rank_hi);
     return *hi > *lo;
-#else                                   // fa esattamente come advance fork ma cerca il carattere c_0 di inizio query invece della ricerca lineare della query
-    gin_fmi_t *fmi = gin->graph_fmi;    // calcola quante volte il carattere c_0 appare nella BWT prima dell'estremo inferiore dell'intervallo del fork e prima dell'estremo superiore dell'intervallo del fork. 
-    word_t encoding = fmi->c2e[c];      // se il numero è diverso significa che ci sono caratteri nell'intervallo del fork che sono preceduti da c_0, ovvero sono il primo carattere di una string label di un nodo
-    count_t rank_lo_m_1 = fork->sa_lo ? gin_fmi_rank(fmi,encoding, fork->sa_lo-1) : 0ull;   // e bisogna andare a controllare le string label dei nodi entrati in quello corrente
+#else
+    gin_fmi_t *fmi = gin->graph_fmi;
+    word_t encoding = fmi->c2e[c];
+    count_t rank_lo_m_1 = fork->sa_lo ? gin_fmi_rank(fmi,encoding, fork->sa_lo-1) : 0ull;
     count_t rank_hi_m_1 = fork->sa_hi ? gin_fmi_rank(fmi,encoding, fork->sa_hi-1) : 0ull;
     uint64_t base = fmi->char_counts[encoding];
     *lo = (int_t)(base + rank_lo_m_1);
     *hi = (int_t)(base + rank_hi_m_1);
-    return *hi > *lo;           // la funzione non serve a far avanzare la query. Serve a capire se ci sono salti da fare. Ritorna true se questo è il caso.
+    return *hi > *lo;
 #endif
 }
 
@@ -1972,9 +1964,9 @@ static void local_subgraph_free(local_subgraph_t *sub) {
     free(sub);
 }
 
-// =====================================================================
-// CSR
-// =====================================================================
+/******************************************************************************
+ * CSR graph view for pigeonhole verification
+ *****************************************************************************/
 
 gin_csr_graph_t* build_csr_from_graph(gin_graph_t *graph) {
     if (!graph || !graph->vertex_list) return NULL;
@@ -2046,9 +2038,9 @@ void free_csr_graph(gin_csr_graph_t *csr) {
     free(csr);
 }
 
-// =====================================================================
-// BFS 
-// =====================================================================
+/******************************************************************************
+ * Bounded subgraph extraction
+ *****************************************************************************/
 static void extract_subgraph_bfs(
     gin_csr_graph_t *csr, vid_t seed_vid, 
     int_t seed_offset, int_t max_dist, int direction, 
@@ -2056,7 +2048,7 @@ static void extract_subgraph_bfs(
 ) {
     if (!csr || seed_vid >= csr->num_nodes) return;
 
-    // Coda statica ultra-veloce sullo Stack (Zero Allocazioni in RAM Heap!)
+    /* Fixed-size queue avoids per-node heap allocation during expansion. */
     bfs_node_t queue[4096]; 
     int head = 0;
     int tail = 0;
@@ -2093,7 +2085,7 @@ static void extract_subgraph_bfs(
                     visited_array[next_vid] = 1;
                     gin_vector_append(subgraph->nodes, (void *)(uintptr_t)next_vid);
                     
-                    // Sicurezza contro overflow della coda statica
+                    /* Keep the node in the subgraph but skip further expansion if the fixed queue is full. */
                     if (tail < 4096) {
                         queue[tail].vid = next_vid;
                         queue[tail].dist_from_seed = next_dist;
@@ -2105,9 +2097,9 @@ static void extract_subgraph_bfs(
     }
 }
 
-// =====================================================================
-// DATI THESEUS
-// =====================================================================
+/******************************************************************************
+ * Theseus graph conversion
+ *****************************************************************************/
 static void build_theseus_data(
     gin_graph_t *graph, gin_csr_graph_t *csr, local_subgraph_t *subgraph, uint8_t *visited_array,
     th_node_t **out_nodes, int *out_num_nodes, th_edge_t **out_edges, int *out_num_edges
@@ -2161,15 +2153,16 @@ static void build_theseus_data(
 
 extern gin_fstruct_t prm_fstruct; 
 
-// =====================================================================
-// VERIFY TASK
-// =====================================================================
+/******************************************************************************
+ * Full-query verification from pigeonhole seeds
+ *****************************************************************************/
 void gin_gin_verify_task(
     gin_gin_t *gin, gin_graph_t *graph, gin_csr_graph_t *csr, gin_gin_decoder_t *dec,
     query_task_t *task, int_t max_matches, int_t max_errors, FILE *log_file
 ) {
     if (!csr || !task || !task->regions_found || !dec) return;
 
+    /* Avoid aligning the same decoded origin more than once for this query. */
     gin_table_t *processed_origins = NULL;
     gin_table_init(&processed_origins, 128, &prm_fstruct, &prm_fstruct);
 
@@ -2201,6 +2194,7 @@ void gin_gin_verify_task(
                 gin_decoded_match_t *dm = (gin_decoded_match_t *)decoded_matches->data[m];
                 if (!dm || dm->vid >= csr->num_nodes) continue;
 
+                /* Translate the seed hit into a candidate full-query start. */
                 int_t json_offset = dm->offset - reg->qo;
                 uint64_t origin_key = ((uint64_t)dm->vid << 32) | (uint32_t)json_offset;
                 void *dummy_check;
@@ -2214,6 +2208,7 @@ void gin_gin_verify_task(
                 
                 local_subgraph_t *subgraph = local_subgraph_init();
 
+                /* Expand a local graph neighborhood around the seed, with query-length bounds plus error slack. */
                 extract_subgraph_bfs(csr, dm->vid, dm->offset + seed_len, query_rem_right + max_errors, 1, global_visited, subgraph);
                 extract_subgraph_bfs(csr, dm->vid, dm->offset, query_rem_left + max_errors, 0, global_visited, subgraph);
 
@@ -2223,7 +2218,7 @@ void gin_gin_verify_task(
                 
                 build_theseus_data(graph, csr, subgraph, global_visited, &th_nodes, &num_th_nodes, &th_edges, &num_th_edges);
 
-                // Backtracking 
+                /* If the inferred query start falls before the seed node, try predecessor nodes. */
                 vid_t start_vid_array[16];
                 int start_offset_array[16];
                 int num_starts = 0;
@@ -2257,7 +2252,7 @@ void gin_gin_verify_task(
                     }
                 }
 
-                // re-alignment
+                /* Re-align from an offset window of radius max_errors to absorb errors before the seed. */
                 #define WIN_MAX_STARTS 128
                 vid_t win_vids[WIN_MAX_STARTS];
                 int   win_offs[WIN_MAX_STARTS];
@@ -2307,9 +2302,7 @@ void gin_gin_verify_task(
                     }
                 }
 
-                // allinea tutta la window (cioè l'intervallo ampio quanto i massimi errori accettabili)
-                // costruendo il graph di theseus una sola volta
-                // (invece di una volta per posizione della window)
+                /* Align all candidate starts against the same temporary Theseus graph. */
                 if (win_num > 0 && best_score != 0) {
                     th_start_t th_starts[WIN_MAX_STARTS];
                     for (int s = 0; s < win_num; s++) {
@@ -2335,6 +2328,7 @@ void gin_gin_verify_task(
                 free(th_nodes);
                 free(th_edges);
                 
+                /* Clear only the marks set while building this local subgraph. */
                 for(int_t n = 0; n < subgraph->nodes->size; n++) {
                     vid_t v = (vid_t)(uintptr_t)subgraph->nodes->data[n];
                     global_visited[v] = 0;

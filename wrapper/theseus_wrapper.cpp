@@ -24,6 +24,7 @@ theseus_result_t empty_result() {
     return res;
 }
 
+/* Copy GIN node labels into the temporary Theseus graph and keep an id translation table. */
 void add_gin_nodes_to_theseus(
     th_node_t *nodes,
     int num_nodes,
@@ -47,6 +48,7 @@ void add_gin_nodes_to_theseus(
     }
 }
 
+/* Add edges whose endpoints were successfully translated to Theseus ids. */
 void add_gin_edges_to_theseus(
     th_edge_t *edges,
     int num_edges,
@@ -99,6 +101,7 @@ theseus_result_t run_theseus_alignment_batch(
         theseus::Graph graph;
         std::unordered_map<long long, theseus::Graph::NodeId> gin_to_theseus;
 
+        /* Build the temporary Theseus graph once, then test all candidate starts. */
         add_gin_nodes_to_theseus(nodes, num_nodes, graph, gin_to_theseus);
         add_gin_edges_to_theseus(edges, num_edges, graph, gin_to_theseus);
 
@@ -120,6 +123,7 @@ theseus_result_t run_theseus_alignment_batch(
                 theseus::Alignment aln = aligner.align(read, t_start_node, starts[i].offset);
                 int score = aln.compute_affine_gap_score(penalties);
 
+                /* Keep the lowest-penalty valid alignment among all starts. */
                 if (!best.valid || score < best_score) {
                     best_score = score;
                     best.score = score;
