@@ -9,7 +9,7 @@ set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 20)
 
-set(BUILD_OPENMP             OFF)
+set(BUILD_OPENMP             ON)
 set(BUILD_MARCH_NATIVE_FLAG  OFF)
 set(BUILD_BUILTIN_POPCOUNT   OFF)
 set(BUILD_DEBUG              OFF)
@@ -60,6 +60,7 @@ set(H_FILES
     ${PROJECT_HEADER_DIR}/gin_constraint_set.h
     ${PROJECT_HEADER_DIR}/gin_annealing.h
     ${PROJECT_HEADER_DIR}/gin_encoded_graph.h
+    ${PROJECT_HEADER_DIR}/gin_pigeonhole.h
     ${PROJECT_HEADER_DIR}/rgfa_parser.h
     ${PROJECT_HEADER_DIR}/permutation_parser.h
     ${PROJECT_HEADER_DIR}/ging_parser.h
