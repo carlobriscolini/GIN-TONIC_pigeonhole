@@ -2147,6 +2147,100 @@ static void gin_pigeonhole_task_clear(query_task_t *task) {
     memset(task, 0, sizeof(*task));
 }
 
+static int_t gin_pigeonhole_count_fork_matches(gin_vector_t *forks) {
+    int_t matching_count = 0;
+    if (!forks) return matching_count;
+    for (int_t i = 0; i < forks->size; i++) {
+        gin_fork_node_t *fork = forks->data[i];
+        matching_count += fork->sa_hi - fork->sa_lo;
+    }
+    return matching_count;
+}
+
+static void gin_pigeonhole_save_region(
+    query_task_t *task,
+    int_t local_start,
+    int_t local_end,
+    gin_vector_t *exact_matches
+) {
+    query_region_t *reg = calloc(1, sizeof(query_region_t));
+    reg->qo = local_start;
+    gin_string_substring(task->str, local_start, local_end, &reg->subs);
+    reg->exact_matches = exact_matches;
+    gin_vector_append(task->regions_found, reg);
+}
+
+static void gin_pigeonhole_advance_seed(
+    gin_gin_t *gin,
+    gin_string_t *query,
+    gin_vector_t **forks,
+    int_t max_forks
+) {
+    gin_vector_t *partial_matches;
+    gin_gin_stats_t stats = {0};
+    int_t t = 1;
+    gin_vector_init(&partial_matches, GIN_VECTOR_INIT_SIZE, &gin_fstruct_fork_node);
+#ifdef GIN_DNA_FMI_DR
+    gin_gin_query_find_step_double_rank(gin, query, max_forks, &t, forks, &partial_matches, &stats);
+#else
+    gin_gin_query_find_step(gin, query, max_forks, &t, forks, &partial_matches, &stats);
+#endif
+    gin_vector_free(partial_matches);
+}
+
+static void gin_pigeonhole_seed_incremental(
+    gin_gin_t *gin,
+    gin_gin_cache_t *gin_cache,
+    query_task_t *task,
+    int_t max_forks,
+    int_t threshold
+) {
+    int_t local_end = task->str->size;
+
+    while (local_end > 0) {
+        gin_vector_t *forks = NULL;
+        int_t local_start = local_end - 1;
+
+        if (gin_cache && gin_cache->depth > 0) {
+            int_t bootstrap_len = MIN2(gin_cache->depth, local_end);
+            local_start = local_end - bootstrap_len;
+
+            gin_string_t *cached_suffix;
+            gin_string_substring(task->str, local_start, local_end, &cached_suffix);
+            gin_gin_cache_lookup(gin_cache, cached_suffix, local_start - 1, max_forks, &forks);
+            gin_string_free(cached_suffix);
+        } else {
+            gin_vector_init(&forks, GIN_VECTOR_INIT_SIZE, &gin_fstruct_fork_node);
+            gin_fork_node_t *root = gin_fork_node_init(0, gin->no_chars, local_start, ROOT);
+            gin_gin_advance_fork(gin, root, task->str);
+
+            if (root->sa_hi <= root->sa_lo) {
+                gin_fork_node_free(root);
+            } else {
+                gin_vector_append(forks, root);
+            }
+        }
+
+        while (local_start > -1) {
+            if (gin_pigeonhole_count_fork_matches(forks) <= threshold) {
+                gin_pigeonhole_save_region(task, local_start, local_end, forks);
+                forks = NULL;
+                local_end = local_start;
+                break;
+            }
+
+            if (local_start == 0) break;
+            local_start--;
+            gin_pigeonhole_advance_seed(gin, task->str, &forks, max_forks);
+        }
+
+        if (forks) {
+            gin_vector_free(forks);
+            break;
+        }
+    }
+}
+
 // =====================================================================
 // MAIN
 // =====================================================================
@@ -2365,39 +2459,7 @@ int gin_main_pigeonhole(int argc, char **argv) {
         
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
-            int_t local_end = tasks[j].str->size;
-
-            for(int_t local_start = tasks[j].str->size - 1; local_start > -1; local_start--) {
-                gin_string_t *current_subs;
-                gin_vector_t *current_exact, *current_partial;
-                gin_gin_stats_t *current_stats;
-
-                gin_string_substring(tasks[j].str, local_start, local_end, &current_subs);
-                gin_gin_query_find(gin, gin_cache, current_subs, max_forks, &current_exact, &current_partial, &current_stats);
-
-                int_t matching_count = 0;
-                for (int_t k = 0; k < current_exact->size; k++) {
-                    gin_fork_node_t *fork = current_exact->data[k];
-                    matching_count += fork->sa_hi - fork->sa_lo;
-                }
-
-                if(matching_count <= threshold){
-                    query_region_t *reg = calloc(1, sizeof(query_region_t));
-                    reg->qo = local_start;
-                    reg->subs = current_subs;
-                    reg->exact_matches = current_exact;
-
-                    gin_vector_free(current_partial);
-                    free(current_stats);
-                    gin_vector_append(tasks[j].regions_found, reg);
-                    local_end = local_start;
-                } else {    
-                    gin_vector_free(current_exact);
-                    gin_vector_free(current_partial);
-                    gin_string_free(current_subs);
-                    free(current_stats);
-                }
-            }
+            gin_pigeonhole_seed_incremental(gin, gin_cache, &tasks[j], max_forks, threshold);
         }
         clock_gettime(CLOCK_REALTIME, &t2);
         timing_stats.seeding_time += to_sec(t1, t2);
