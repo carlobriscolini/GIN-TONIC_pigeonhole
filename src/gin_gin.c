@@ -2295,18 +2295,37 @@ void gin_gin_verify_task(
                     }
                 }
 
-                // allineamento sulle posizioni espanse dalla window
-                for (int s = 0; s < win_num; s++) {
-                    if (best_score == 0) break;
-                    theseus_result_t res = run_theseus_alignment(
+                for (int a = 0; a < win_num; a++) {
+                    for (int b = a + 1; b < win_num; ) {
+                        if (win_vids[a] == win_vids[b] && win_offs[a] == win_offs[b]) {
+                            win_num--;
+                            win_vids[b] = win_vids[win_num];
+                            win_offs[b] = win_offs[win_num];
+                        } else {
+                            b++;
+                        }
+                    }
+                }
+
+                // allinea tutta la window (cioè l'intervallo ampio quanto i massimi errori accettabili)
+                // costruendo il graph di theseus una sola volta
+                // (invece di una volta per posizione della window)
+                if (win_num > 0 && best_score != 0) {
+                    th_start_t th_starts[WIN_MAX_STARTS];
+                    for (int s = 0; s < win_num; s++) {
+                        th_starts[s].node_id = (long long)win_vids[s];
+                        th_starts[s].offset = win_offs[s];
+                    }
+
+                    theseus_result_t res = run_theseus_alignment_batch(
                         th_nodes, num_th_nodes, th_edges, num_th_edges,
-                        task->str->seq, (long long)win_vids[s], win_offs[s]
+                        task->str->seq, th_starts, win_num
                     );
 
                     if (res.valid && res.score < best_score) {
                         best_score = res.score;
                         best_offset = res.start_offset;
-                        best_vid = win_vids[s];
+                        best_vid = (vid_t)res.start_node_id;
                         strncpy(best_seed, reg->subs->seq, sizeof(best_seed) - 1);
                         found_any = 1;
                     }

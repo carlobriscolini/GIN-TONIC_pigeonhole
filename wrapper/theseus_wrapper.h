@@ -19,10 +19,16 @@ typedef struct {
 } th_edge_t;
 
 typedef struct {
+    long long node_id;
+    int offset;
+} th_start_t;
+
+typedef struct {
     int score;             
     char* cigar_string;    
     int start_offset;      
     int end_offset;
+    long long start_node_id;
     int valid;             
 } theseus_result_t;
 
@@ -32,6 +38,14 @@ theseus_result_t run_theseus_alignment(
     const char* read_seq, 
     long long start_node_id, 
     int start_offset
+);
+
+theseus_result_t run_theseus_alignment_batch(
+    th_node_t* nodes, int num_nodes,
+    th_edge_t* edges, int num_edges,
+    const char* read_seq,
+    th_start_t* starts,
+    int num_starts
 );
 
 void free_theseus_result(theseus_result_t* res);
