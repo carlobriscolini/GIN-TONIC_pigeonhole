@@ -1945,30 +1945,13 @@ void gin_gin_serialize_to_buffer_imt_helper(gin_imt_node_t *node, gin_bs_t *bs, 
 
 
 #include "../wrapper/theseus_wrapper.h"
+#include "gin_pigeonhole.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-// =====================================================================
-// STRUTTURE DATI
-// =====================================================================
-typedef struct query_task_ {
-    gin_string_t *str;
-    gin_vector_t *regions_found;
-    gin_vector_t *final_matches;
-} query_task_t;
 
-typedef struct query_region {
-    int_t qo;
-    gin_string_t *subs;
-    int_t matching_count;
-    gin_vector_t *exact_matches;
-    gin_vector_t *partial_matches;
-    gin_gin_stats_t *stats;
-} query_region_t;
-
-// La nostra nuova leggerissima struct per la coda
 typedef struct {
     vid_t vid;
     int_t dist_from_seed;
@@ -1978,28 +1961,20 @@ typedef struct {
     gin_vector_t *nodes; 
 } local_subgraph_t;
 
-local_subgraph_t* local_subgraph_init() {
+static local_subgraph_t* local_subgraph_init() {
     local_subgraph_t *sub = malloc(sizeof(local_subgraph_t));
     gin_vector_init(&sub->nodes, 16, NULL);
     return sub;
 }
 
-void local_subgraph_free(local_subgraph_t *sub) {
+static void local_subgraph_free(local_subgraph_t *sub) {
     gin_vector_free(sub->nodes);
     free(sub);
 }
 
 // =====================================================================
-// CSR (Compressed Sparse Row) GRAPH
+// CSR
 // =====================================================================
-typedef struct {
-    uint32_t *fwd_offsets;
-    uint32_t *fwd_edges;
-    uint32_t *bwd_offsets;
-    uint32_t *bwd_edges;
-    uint32_t *node_lengths;
-    int_t num_nodes;
-} gin_csr_graph_t;
 
 gin_csr_graph_t* build_csr_from_graph(gin_graph_t *graph) {
     if (!graph || !graph->vertex_list) return NULL;
@@ -2074,7 +2049,7 @@ void free_csr_graph(gin_csr_graph_t *csr) {
 // =====================================================================
 // BFS 
 // =====================================================================
-void extract_subgraph_bfs(
+static void extract_subgraph_bfs(
     gin_csr_graph_t *csr, vid_t seed_vid, 
     int_t seed_offset, int_t max_dist, int direction, 
     uint8_t *visited_array, local_subgraph_t *subgraph
@@ -2133,7 +2108,7 @@ void extract_subgraph_bfs(
 // =====================================================================
 // DATI THESEUS
 // =====================================================================
-void build_theseus_data(
+static void build_theseus_data(
     gin_graph_t *graph, gin_csr_graph_t *csr, local_subgraph_t *subgraph, uint8_t *visited_array,
     th_node_t **out_nodes, int *out_num_nodes, th_edge_t **out_edges, int *out_num_edges
 ) {
@@ -2341,7 +2316,6 @@ void gin_gin_verify_task(
                 free(th_nodes);
                 free(th_edges);
                 
-                // PULIZIA O(K) MAGICA: Rimettiamo a 0 solo i nodi estratti! Niente più memset enormi.
                 for(int_t n = 0; n < subgraph->nodes->size; n++) {
                     vid_t v = (vid_t)(uintptr_t)subgraph->nodes->data[n];
                     global_visited[v] = 0;

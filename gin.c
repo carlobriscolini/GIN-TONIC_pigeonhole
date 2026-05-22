@@ -20,6 +20,7 @@
 #include "gin_gin.h"
 
 #include "gin_annealing.h"
+#include "gin_pigeonhole.h"
 #include <getopt.h>
 #include <time.h>
 #include "rgfa_parser.h"
@@ -85,6 +86,7 @@ int gin_main_query(int argc, char **argv, gin_query_mode_t mode);
 int gin_main_decode(int argc, char **argv, gin_decode_mode_t mode);
 int gin_main_permutation(int argc, char **argv);
 int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode);
+int gin_main_pigeonhole(int argc, char **argv);
 int gin_main_help(gin_mode_t progmode, char *progname);
 
 gin_mode_t gin_string_to_mode(char *str) {
@@ -2126,26 +2128,24 @@ int gin_main_utils(int argc, char **argv, gin_utils_mode_t mode) {
 }
 
 
-#include <stdint.h>
+static void gin_pigeonhole_region_free(query_region_t *region) {
+    if (!region) return;
+    gin_string_free(region->subs);
+    gin_vector_free(region->exact_matches);
+    free(region);
+}
 
-// =====================================================================
-// CSR GRAPH - Definizioni e Prototipi
-// =====================================================================
-typedef struct {
-    uint32_t *fwd_offsets;
-    uint32_t *fwd_edges;
-    uint32_t *bwd_offsets;
-    uint32_t *bwd_edges;
-    uint32_t *node_lengths;
-    int_t num_nodes;
-} gin_csr_graph_t;
-
-gin_csr_graph_t* build_csr_from_graph(gin_graph_t *graph);
-void free_csr_graph(gin_csr_graph_t *csr);
-void gin_gin_verify_task(
-    gin_gin_t *gin, gin_graph_t *graph, gin_csr_graph_t *csr, gin_gin_decoder_t *dec,
-    void *task, int_t max_matches, int_t max_errors, FILE *log_file
-);
+static void gin_pigeonhole_task_clear(query_task_t *task) {
+    if (!task) return;
+    gin_string_free(task->str);
+    if (task->regions_found) {
+        for (int_t i = 0; i < task->regions_found->size; i++) {
+            gin_pigeonhole_region_free((query_region_t *)task->regions_found->data[i]);
+        }
+        gin_vector_free(task->regions_found);
+    }
+    memset(task, 0, sizeof(*task));
+}
 
 // =====================================================================
 // MAIN
@@ -2219,9 +2219,9 @@ int gin_main_pigeonhole(int argc, char **argv) {
         }
     }
 
-#ifdef GIN_OMP
-    omp_set_num_threads((int)num_threads);
-#endif
+    #ifdef GIN_OMP
+        omp_set_num_threads((int)num_threads);
+    #endif
 
     // 1. Lettura Indice Reference
     fref = fopen(fref_path, "r");
@@ -2305,21 +2305,6 @@ int gin_main_pigeonhole(int argc, char **argv) {
     int_t i;
     char *buf = calloc(GIN_MAIN_QUERY_BUF_LEN, sizeof(char));
 
-    typedef struct query_task_ {
-        gin_string_t *str;
-        gin_vector_t *regions_found;
-        gin_vector_t *final_matches;
-    } query_task_t;
-
-    typedef struct query_region {
-        int_t qo;
-        gin_string_t *subs;
-        int_t matching_count;
-        gin_vector_t *exact_matches;
-        gin_vector_t *partial_matches;
-        gin_gin_stats_t *stats;
-    } query_region_t;
-
     query_task_t *tasks = calloc(batch_size, sizeof(query_task_t));
 
     FILE *main_log_file = fopen("alignment_log.txt", "w");
@@ -2339,16 +2324,16 @@ int gin_main_pigeonhole(int argc, char **argv) {
             }
             gin_string_init_cstr(&tasks[i].str, buf);
             gin_vector_init(&tasks[i].regions_found, GIN_VECTOR_INIT_SIZE, NULL);
-            gin_vector_init(&tasks[i].final_matches, GIN_VECTOR_INIT_SIZE, &gin_fstruct_decoded_match);
 
             queries_processed++;
             i++;
         }
 
-#ifdef GIN_OMP
-#pragma omp parallel for schedule(dynamic) default(none) \
-    shared(i, tasks, gin, gin_cache, max_forks, threshold, fgraph_path, csr, graph, gin_dec, max_matches, main_log_file)
-#endif
+        #ifdef GIN_OMP
+        #pragma omp parallel for schedule(dynamic) default(none) \
+            shared(i, tasks, gin, gin_cache, max_forks, threshold, fgraph_path, csr, graph, gin_dec, max_matches, main_log_file)
+        #endif
+        
         for (int_t j = 0; j < i; j++) {
             if (!tasks[j].str) continue;
             int_t local_end = tasks[j].str->size;
@@ -2371,11 +2356,10 @@ int gin_main_pigeonhole(int argc, char **argv) {
                     query_region_t *reg = calloc(1, sizeof(query_region_t));
                     reg->qo = local_start;
                     reg->subs = current_subs;
-                    reg->matching_count = matching_count;
                     reg->exact_matches = current_exact;
-                    reg->partial_matches = current_partial;
-                    reg->stats = current_stats;
 
+                    gin_vector_free(current_partial);
+                    free(current_stats);
                     gin_vector_append(tasks[j].regions_found, reg);
                     local_end = local_start;
                 } else {    
@@ -2389,6 +2373,9 @@ int gin_main_pigeonhole(int argc, char **argv) {
             if(fgraph_path && csr) {
                 gin_gin_verify_task(gin, graph, csr, gin_dec, &tasks[j], max_matches, 5, main_log_file);
             }
+        }
+        for (int_t j = 0; j < i; j++) {
+            gin_pigeonhole_task_clear(&tasks[j]);
         }
         if(exit_flag) break;
     }
