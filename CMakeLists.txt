@@ -137,7 +137,8 @@ target_link_libraries(gin_lib_static PUBLIC divsufsort64-gin)
 target_link_libraries(gin_lib_static PUBLIC m)
 
 # theseus (libreria C++ per l'allineamento sui grafi)
-target_link_libraries(gin_lib_static PUBLIC ${PROJECT_EXTERN_DIR}/theseus-lib/build/libtheseus.a)
+target_link_libraries(gin_lib_static PUBLIC theseus)
+target_compile_features(gin_lib_static PUBLIC cxx_std_23)
 
 target_include_directories(
     gin_lib_static PUBLIC ${PROJECT_HEADER_DIR}

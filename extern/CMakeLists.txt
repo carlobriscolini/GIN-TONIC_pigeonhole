@@ -34,6 +34,7 @@ endif()
 
 init_submodule(libdivsufsort-gin)
 init_submodule(sdsl)
+init_submodule(theseus-lib)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Do not build a shared library for libdivsufsort")
 set(BUILD_EXAMPLES OFF CACHE BOOL "Do not build libdivsufsort examples")
@@ -43,3 +44,9 @@ add_subdirectory(libdivsufsort-gin)
 if(BUILD_SDSL)
     add_subdirectory(sdsl)
 endif()
+
+set(CMAKE_INSTALL_INCLUDEDIR include CACHE PATH "Install include directory" FORCE)
+set(CMAKE_INSTALL_LIBDIR lib CACHE PATH "Install library directory" FORCE)
+set(CMAKE_INSTALL_BINDIR bin CACHE PATH "Install binary directory" FORCE)
+set(ENABLE_TESTS OFF CACHE BOOL "Do not build theseus tests" FORCE)
+add_subdirectory(theseus-lib)
