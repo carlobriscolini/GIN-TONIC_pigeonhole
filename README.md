@@ -1,3 +1,53 @@
+# GIN-TONIC + Pigeonhole: seed-and-verify read alignment on pangenome graphs
+
+This repository extends [GIN-TONIC](https://github.com/uensalo/gin) (Öztürk, Mattavelli, Ribeca, *NAR Genomics and Bioinformatics*, 2024) with a new `gin pigeonhole` subcommand: a short-read **seed-and-verify aligner that works directly on the graph**.
+
+📄 **Technical report:** [Pigeonhole-Based Seeding for Sequence-to-Graph Alignment on Pangenome Graphs](docs/pigeonhole_report.pdf)
+
+## What `gin pigeonhole` adds
+
+1. **Adaptive pigeonhole seeding.** Each read is scanned right-to-left with GIN-TONIC backward search; a region is committed as a seed as soon as it has at most τ exact occurrences in the graph.
+2. **Local subgraph extraction.** Every seed hit is decoded to a graph position and expanded with a bounded bidirectional BFS over a CSR view of the graph.
+3. **Optimal verification.** The full read is aligned against the subgraph with [Theseus](https://github.com/albertjimenezbl/theseus-lib) (affine-gap, cyclic graphs supported) through a small C/C++ wrapper, trying a window of start offsets around each seed.
+4. **Parallelism.** Reads are processed in batches. Within each batch, all reads are first seeded in parallel and then verified in parallel (OpenMP). The index, cache, CSR graph and decoder are shared read-only across threads.
+
+## Results
+
+MHC graph (980 vertices, 1,399 edges), 10,000 simulated short reads, k = 5, τ = 1, AMD Ryzen 7 7800X3D (8 cores).
+
+| Workload | Aligned | Correct among aligned | 1 thread | 8 threads | Parallel efficiency |
+|---|---|---|---|---|---|
+| Exact reads | 97.9% | 100% | 1.88 s | 0.25 s | 94.1% |
+| Reads with errors | 98.2% | 99.0% | 37.3 s | 4.91 s | 94.9% |
+
+Peak memory stays at ~136 MB from 1 to 8 threads. Verification accounts for 92–99% of runtime; raising τ to 10–30 aligns almost every read at a much higher verification cost (see the report).
+
+## Usage
+
+```bash
+git submodule update --init
+mkdir build && (cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && make)
+
+# index.gini and cache.ginc are built with the standard gin pipeline (see below)
+./build/gin pigeonhole -r index.gini -g graph.ging -i reads.ginq -C cache.ginc -t 1 -b 1024 -j 8
+```
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `-r` | GIN-TONIC index (`.gini`) | required |
+| `-g` | graph (`.ging`), needed for verification | required |
+| `-i` | reads, one per line | stdin |
+| `-C` | precomputed cache (`.ginc`) | none |
+| `-t` | occurrence threshold τ for committing a seed | 1 |
+| `-b` | batch size | 8 |
+| `-j` | threads | 1 |
+
+Alignments and timing statistics are written to `alignment_log.txt`.
+
+---
+
+*The original GIN-TONIC documentation follows.*
+
 # GIN-TONIC: Non-hierarchical full-text indexing for graphs
 
 **GIN-TONIC** (**G**raph **IN**dexing **T**hrough **O**ptimal **N**ear **I**nterval **C**ompaction), or `gin` for short, is a data structure inspired by the FM-Index for the indexing of directed, string labelled graphs. 
